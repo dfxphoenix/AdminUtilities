@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -9,35 +10,44 @@ using Oxide.Core;
 using Oxide.Core.Configuration;
 using Oxide.Core.Plugins;
 using UnityEngine;
+using Network;
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Utilities", "dFxPhoeniX", "1.9.8")]
+    [Info("Admin Utilities", "dFxPhoeniX", "2.0.6")]
     [Description("Toggle NoClip, teleport Under Terrain and more")]
-    class AdminUtilities : RustPlugin
+    public class AdminUtilities : RustPlugin
     {
         private const string permTerrain = "adminutilities.disconnectteleport";
         private const string permInventory = "adminutilities.saveinventory";
         private const string permHHT = "adminutilities.maxhht";
         private const string permNoClip = "adminutilities.nocliptoggle";
+        private const string permGodMode = "adminutilities.godmodetoggle";
+
         private DataFileSystem dataFile;
         private DataFileSystem dataFileItems;
-        private bool newSave;
-        private readonly List<BasePlayer> underterrain = new List<BasePlayer>();
-        private bool flying = false;
 
-        public class PlayerInfo
+        private bool newSave;
+
+        ////////////////////////////////////////////////////////////
+        // Files
+        ////////////////////////////////////////////////////////////
+
+        private class PlayerInfo
         {
             public string Teleport { get; set; } = Vector3.zero.ToString();
             public bool SaveInventory { get; set; } = true;
+            public bool UnderTerrain { get; set; } = false;
+            public bool NoClip { get; set; } = false;
+            public bool GodMode { get; set; } = false;
         }
 
-        public class PlayerInfoItems
+        private class PlayerInfoItems
         {
             public List<AdminUtilitiesItem> Items { get; set; } = new List<AdminUtilitiesItem>();
         }
 
-        public class AdminUtilitiesItem
+        private class AdminUtilitiesItem
         {
             public string container { get; set; } = "main";
             public string shortname { get; set; }
@@ -94,7 +104,7 @@ namespace Oxide.Plugins
             }
         }
 
-        public class AdminUtilitiesMod
+        private class AdminUtilitiesMod
         {
             public string shortname { get; set; }
             public int amount { get; set; }
@@ -103,41 +113,9 @@ namespace Oxide.Plugins
             public int itemid { get; set; }
         }
 
-        private void OnNewSave()
-        {
-            newSave = true;
-        }
-
-        private void Init()
-        {
-            Unsubscribe(nameof(OnPlayerDisconnected));
-            Unsubscribe(nameof(OnPlayerConnected));
-            Unsubscribe(nameof(OnPlayerSleepEnded));
-
-            dataFile = new DataFileSystem($"{Interface.Oxide.DataDirectory}\\AdminUtilities\\Config");
-            dataFileItems = new DataFileSystem($"{Interface.Oxide.DataDirectory}\\AdminUtilities\\Items");
-        }
-
-        private void Loaded()
-        {
-            permission.RegisterPermission(permTerrain, this);
-            permission.RegisterPermission(permInventory, this);
-            permission.RegisterPermission(permHHT, this);
-            permission.RegisterPermission(permNoClip, this);
-
-            LoadVariables();
-        }
-
-        private void OnServerInitialized()
-        {
-            Subscribe(nameof(OnPlayerDisconnected));
-            Subscribe(nameof(OnPlayerConnected));
-            Subscribe(nameof(OnPlayerSleepEnded));
-        }
-
         private PlayerInfo LoadPlayerInfo(BasePlayer player)
         {
-            if (!player || !player.IsConnected || !HasPermission(player, permTerrain) || !HasPermission(player, permInventory))
+            if (dataFile == null)
                 return null;
 
             return dataFile.ReadObject<PlayerInfo>($"{player.UserIDString}");
@@ -153,7 +131,7 @@ namespace Oxide.Plugins
 
         private PlayerInfoItems LoadPlayerInfoItems(BasePlayer player)
         {
-            if (!player || !player.IsConnected || !HasPermission(player, permTerrain) || !HasPermission(player, permInventory))
+            if (dataFileItems == null)
                 return null;
 
             return dataFileItems.ReadObject<PlayerInfoItems>($"{player.UserIDString}");
@@ -167,19 +145,155 @@ namespace Oxide.Plugins
             }
         }
 
-        private bool GetSave()
+        ////////////////////////////////////////////////////////////
+        // Oxide Hooks
+        ////////////////////////////////////////////////////////////
+
+        private void OnNewSave()
         {
-            if (newSave || BuildingManager.server.buildingDictionary.Count == 0)
+            newSave = true;
+        }
+
+        private void Init()
+        {
+            Unsubscribe(nameof(OnPlayerDisconnected));
+            Unsubscribe(nameof(OnPlayerConnected));
+            Unsubscribe(nameof(OnPlayerRespawned));
+            Unsubscribe(nameof(OnPlayerSleepEnded));
+
+            InitConfig();
+
+            dataFile = new DataFileSystem($"{Interface.Oxide.DataDirectory}\\AdminUtilities\\Settings");
+            dataFileItems = new DataFileSystem($"{Interface.Oxide.DataDirectory}\\AdminUtilities\\Items");
+        }
+
+        private void Loaded()
+        {
+            permission.RegisterPermission(permTerrain, this);
+            permission.RegisterPermission(permInventory, this);
+            permission.RegisterPermission(permHHT, this);
+            permission.RegisterPermission(permNoClip, this);
+            permission.RegisterPermission(permGodMode, this);
+        }
+
+        private void OnServerInformationUpdated()
+        {
+            foreach (var player in BasePlayer.activePlayerList)
             {
-                return true;
+                if (!HasPermission(player, permNoClip) && player.IsFlying)
+                {
+                    player.SendConsoleCommand("noclip");
+
+                    var user = LoadPlayerInfo(player);
+
+                    if (user == null)
+                    {
+                        return;
+                    }
+
+                    user.NoClip = false;
+                    SavePlayerInfo(player, user);
+                }
+
+                if (!HasPermission(player, permGodMode) && player.IsGod())
+                {
+                    player.SendConsoleCommand("setinfo \"global.god\" \"False\"");
+
+                    var user = LoadPlayerInfo(player);
+
+                    if (user == null)
+                    {
+                        return;
+                    }
+
+                    user.GodMode = false;
+                    SavePlayerInfo(player, user);
+                }
+
+                timer.Once(0.2f, () => {
+                    if (player.IsDeveloper && !(player.IsFlying || player.IsGod()))
+                    {
+                        player.SetPlayerFlag(BasePlayer.PlayerFlags.IsDeveloper, false);
+                    }
+                });
+            }
+        }
+
+        private object OnClientCommand(Connection connection, string command)
+        {
+            if (command.Contains("/")) return null;
+
+            var player = BasePlayer.FindByID(connection.userid);
+            if (player == null) return null;
+
+            string lowerCommand = command.ToLower();
+
+            if (lowerCommand.Contains("god") && lowerCommand.Contains("true"))
+            {
+                if (!HasPermission(player, permGodMode))
+                {
+                    return false;
+                }
             }
 
-            return false;
+            return null;
+        }
+
+        private void OnServerInitialized()
+        {
+            Subscribe(nameof(OnPlayerDisconnected));
+            Subscribe(nameof(OnPlayerConnected));
+            Subscribe(nameof(OnPlayerRespawned));
+            Subscribe(nameof(OnPlayerSleepEnded));
+
+            if (GetSave())
+            {
+                if (wipeSettings)
+                {
+                    string folderPath = $"{Interface.Oxide.DataDirectory}/AdminUtilities/Settings";
+
+                    if (!Directory.Exists(folderPath))
+                    {
+                        return;
+                    }
+
+                    string[] Files = Directory.GetFiles(folderPath);
+                    foreach (string file in Files)
+                    {
+                        File.Delete(file);
+                    }
+                }
+
+                if (wipeItems)
+                {
+                    string folderItemsPath = $"{Interface.Oxide.DataDirectory}/AdminUtilities/Items";
+
+                    if (!Directory.Exists(folderItemsPath))
+                    {
+                        return;
+                    }
+
+                    string[] ItemsFiles = Directory.GetFiles(folderItemsPath);
+                    foreach (string file in ItemsFiles)
+                    {
+                        File.Delete(file);
+                    }
+                }
+
+                newSave = false;
+            }
         }
 
         private void OnEntityTakeDamage(BasePlayer player, HitInfo hitInfo)
         {
-            if (hitInfo != null && underterrain.Contains(player))
+            var user = LoadPlayerInfo(player);
+
+            if (user == null)
+            {
+                return;
+            }
+
+            if (hitInfo != null && user.UnderTerrain)
             {
                 hitInfo.damageTypes = new Rust.DamageTypeList();
             }
@@ -193,63 +307,89 @@ namespace Oxide.Plugins
             }
 
             var user = LoadPlayerInfo(player);
-            var userItems = LoadPlayerInfoItems(player);
 
             if (user == null)
             {
                 return;
             }
 
+            if (HasPermission(player, permTerrain))
+            {
+                var userTeleport = user.Teleport.ToVector3();
+                var position = userTeleport == Vector3.zero ? defaultPos : userTeleport;
+
+                if (position == Vector3.zero)
+                {
+                    position = new Vector3(player.transform.position.x, TerrainMeta.HeightMap.GetHeight(player.transform.position) - 5f, player.transform.position.z);
+                }
+
+                player.Teleport(position);
+
+                UnderTerrain(player);
+            }
+
+            if (!persistentNoClip && user.NoClip)
+            {
+                user.NoClip = false;
+                SavePlayerInfo(player, user);
+            }
+
+            if (!persistentGodMode && user.GodMode)
+            {
+                user.GodMode = false;
+                SavePlayerInfo(player, user);
+            }
+
+            var userItems = LoadPlayerInfoItems(player);
+
             if (userItems == null)
             {
                 return;
             }
 
-            var userTeleport = user.Teleport.ToVector3();
-            var position = userTeleport == Vector3.zero ? defaultPos : userTeleport;
-
-            if (position == Vector3.zero)
-            {
-                position = new Vector3(player.transform.position.x, TerrainMeta.HeightMap.GetHeight(player.transform.position) - 5f, player.transform.position.z);
-            }
-
-            player.Teleport(position);
             SaveInventory(player, user, userItems);
         }
 
         private void OnPlayerConnected(BasePlayer player)
         {
             var user = LoadPlayerInfo(player);
-            var userItems = LoadPlayerInfoItems(player);
 
             if (user == null)
             {
                 return;
             }
 
-            if (userItems == null)
+            if (!HasPermission(player, permTerrain) && user.UnderTerrain)
             {
-                return;
+                NoUnderTerrain(player);
             }
 
-            if (wipeSaves && GetSave())
+            if (persistentNoClip && HasPermission(player, permNoClip) && user.NoClip)
             {
-                userItems.Items.Clear();
+                player.SetPlayerFlag(BasePlayer.PlayerFlags.IsDeveloper, true);
 
-                newSave = false;
-                SavePlayerInfoItems(player, userItems);
+                timer.Once(0.2f, () => {
+                    player.SendConsoleCommand("noclip");
+                });
             }
 
-            LoadPlayerInfo(player);
-
-            if (player.IsDead())
+            if (persistentGodMode && HasPermission(player, permGodMode) && user.GodMode)
             {
-                return;
+                player.SetPlayerFlag(BasePlayer.PlayerFlags.IsDeveloper, true);
+
+                timer.Once(0.2f, () => {
+                    player.SendConsoleCommand("setinfo \"global.god\" \"True\"");
+                });
             }
+        }
 
-            if (player.IsSleeping() && HasPermission(player, permTerrain))
+        private void OnPlayerRespawned(BasePlayer player)
+        {
+            if (HasPermission(player, permHHT))
             {
-                UnderTerrain(player);
+                player.health = 100f;
+                player.metabolism.hydration.value = player.metabolism.hydration.max;
+                player.metabolism.calories.value = player.metabolism.calories.max;
             }
         }
 
@@ -260,26 +400,23 @@ namespace Oxide.Plugins
                 return;
             }
 
-            NoUnderTerrain(player);
+            if (HasPermission(player, permTerrain))
+            {
+                NoUnderTerrain(player);
+            }
 
             var user = LoadPlayerInfo(player);
-            var userItems = LoadPlayerInfoItems(player);
 
             if (user == null)
             {
                 return;
             }
 
+            var userItems = LoadPlayerInfoItems(player);
+
             if (userItems == null)
             {
                 return;
-            }
-
-            if (HasPermission(player, permHHT))
-            {
-                player.health = 100f;
-                player.metabolism.hydration.value = player.metabolism.hydration.max;
-                player.metabolism.calories.value = player.metabolism.calories.max;
             }
 
             if (HasPermission(player, permInventory) && user.SaveInventory && userItems.Items.Count > 0)
@@ -312,24 +449,17 @@ namespace Oxide.Plugins
             }
         }
 
-        private void OnPlayerInput(BasePlayer player, InputState input)
-        {
-            if (!HasPermission(player, permNoClip))
-            {
-                return;
-            }
-            if ((input.IsDown(BUTTON.FORWARD) || input.IsDown(BUTTON.BACKWARD) || input.IsDown(BUTTON.LEFT) || input.IsDown(BUTTON.RIGHT) || input.IsDown(BUTTON.JUMP)) && player.IsDeveloper && !flying)
-            {
-                player.SetPlayerFlag(BasePlayer.PlayerFlags.IsDeveloper, false);
-            }
-        }
-
         private object OnPlayerViolation(BasePlayer player, AntiHackType type)
         {
-            if (player.IsSleeping() && type == AntiHackType.InsideTerrain && HasPermission(player, permTerrain)) return false;
-            if (player.IsFlying && (type == AntiHackType.FlyHack || type == AntiHackType.InsideTerrain || type == AntiHackType.NoClip) && HasPermission(player, permNoClip)) return false;
+            if (player.IsSleeping() && (type == AntiHackType.InsideTerrain) && HasPermission(player, permTerrain)) return true;
+            if (player.IsFlying && (type == AntiHackType.FlyHack || type == AntiHackType.InsideTerrain || type == AntiHackType.NoClip) && HasPermission(player, permNoClip)) return true;
+
             return null;
         }
+
+        ////////////////////////////////////////////////////////////
+        // Commands
+        ////////////////////////////////////////////////////////////
 
         [ChatCommand("disconnectteleport")]
         private void cmdDisconnectTeleport(BasePlayer player, string command, string[] args)
@@ -344,7 +474,6 @@ namespace Oxide.Plugins
 
             if (user == null)
             {
-                Player.Message(player, msg("NoPermission", player.UserIDString));
                 return;
             }
 
@@ -420,7 +549,6 @@ namespace Oxide.Plugins
 
             if (user == null)
             {
-                Player.Message(player, msg("NoPermission", player.UserIDString));
                 return;
             }
 
@@ -438,26 +566,84 @@ namespace Oxide.Plugins
                 return;
             }
 
+            var user = LoadPlayerInfo(player);
+
+            if (user == null)
+            {
+                return;
+            }
+
             player.SetPlayerFlag(BasePlayer.PlayerFlags.IsDeveloper, true);
             if (!player.IsFlying)
             {
-                timer.Once(0.1f, () => {
+                timer.Once(0.2f, () => {
                     player.SendConsoleCommand("noclip");
                     Player.Message(player, msg("FlyEnabled", player.UserIDString));
-                    flying = true;
                 });
             }
             else
             {
                 player.SendConsoleCommand("noclip");
                 Player.Message(player, msg("FlyDisabled", player.UserIDString));
-                flying = false;
             }
+
+            user.NoClip = !player.IsFlying;
+            SavePlayerInfo(player, user);
         }
 
-        public void UnderTerrain(BasePlayer player)
+        [ChatCommand("god")]
+        private void cmdGodMode(BasePlayer player, string command, string[] args)
         {
-            if (!player.IsConnected || underterrain.Contains(player))
+            if (!HasPermission(player, permGodMode))
+            {
+                Player.Message(player, msg("NoPermission", player.UserIDString));
+                return;
+            }
+
+            var user = LoadPlayerInfo(player);
+
+            if (user == null)
+            {
+                return;
+            }
+
+            player.SetPlayerFlag(BasePlayer.PlayerFlags.IsDeveloper, true);
+            if (!player.IsGod())
+            {
+                timer.Once(0.2f, () => {
+                    player.SendConsoleCommand("setinfo \"global.god\" \"True\"");
+                    Player.Message(player, msg("GodEnabled", player.UserIDString));
+                });
+            }
+            else
+            {
+                player.SendConsoleCommand("setinfo \"global.god\" \"False\"");
+                Player.Message(player, msg("GodDisabled", player.UserIDString));
+            }
+
+            user.GodMode = !player.IsGod();
+            SavePlayerInfo(player, user);
+        }
+
+        ////////////////////////////////////////////////////////////
+        // General Methods
+        ////////////////////////////////////////////////////////////
+
+        private bool GetSave()
+        {
+            if (newSave || BuildingManager.server.buildingDictionary.Count == 0)
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        private void UnderTerrain(BasePlayer player)
+        {
+            var user = LoadPlayerInfo(player);
+
+            if (user == null)
             {
                 return;
             }
@@ -472,13 +658,16 @@ namespace Oxide.Plugins
                 player.metabolism.calories.min = player.metabolism.calories.value;
                 player.metabolism.isDirty = true;
                 player.metabolism.SendChangesToClient();
-                underterrain.Add(player);
+                user.UnderTerrain = true;
+                SavePlayerInfo(player, user);
             }
         }
 
-        public void NoUnderTerrain(BasePlayer player)
+        private void NoUnderTerrain(BasePlayer player)
         {
-            if (!player.IsConnected || !underterrain.Contains(player))
+            var user = LoadPlayerInfo(player);
+
+            if (user == null)
             {
                 return;
             }
@@ -494,11 +683,13 @@ namespace Oxide.Plugins
                 player.metabolism.oxygen.min = 0;
                 player.metabolism.calories.min = 0;
                 player.metabolism.wetness.max = 1;
-                underterrain.Remove(player);
+                player.metabolism.SendChangesToClient();
+                user.UnderTerrain = false;
+                SavePlayerInfo(player, user);
             }
         }
 
-        public string FormatPosition(Vector3 position)
+        private string FormatPosition(Vector3 position)
         {
             string x = position.x.ToString("N2");
             string y = position.y.ToString("N2");
@@ -642,11 +833,30 @@ namespace Oxide.Plugins
             return player != null && player.IPlayer.HasPermission(permName);
         }
 
-        #region Config
+        private string msg(string key, string id = null, params object[] args)
+        {
+            string message = id == null ? RemoveFormatting(lang.GetMessage(key, this, id)) : lang.GetMessage(key, this, id);
 
-        private bool Changed;
+            return args.Length > 0 ? string.Format(message, args) : message;
+        }
+
+        private string RemoveFormatting(string source)
+        {
+            return source.Contains(">") ? Regex.Replace(source, "<.*?>", string.Empty) : source;
+        }
+
+        ////////////////////////////////////////////////////////////
+        // Configs
+        ////////////////////////////////////////////////////////////
+
+        private bool ConfigChanged;
         private Vector3 defaultPos;
-        private bool wipeSaves;
+        private bool wipeItems;
+        private bool wipeSettings;
+        private bool persistentNoClip;
+        private bool persistentGodMode;
+
+        protected override void LoadDefaultConfig() => PrintWarning("Generating default configuration file...");
 
         protected override void LoadDefaultMessages()
         {
@@ -662,6 +872,8 @@ namespace Oxide.Plugins
                 ["OutOfBounds"] = "The specified coordinates are not within the allowed boundaries of the map.",
                 ["FlyDisabled"] = "You switched NoClip off!",
                 ["FlyEnabled"] = "You switched NoClip on!",
+                ["GodDisabled"] = "You switched GodMode off!",
+                ["GodEnabled"] = "You switched GodMode on!",
                 ["NoPermission"] = "You do not have permission to use this command."
             }, this);
             lang.RegisterMessages(new Dictionary<string, string>
@@ -675,57 +887,118 @@ namespace Oxide.Plugins
                 ["DisconnectTeleportReset"] = "/disconnectteleport reset - resetează poziția ta de deconectare pentru a fi sub pământ, doar dacă o poziție nu este configurată într-o filă de configurare",
                 ["OutOfBounds"] = "Coordonatele specificate nu se încadrează în limitele hărții.",
                 ["FlyDisabled"] = "Ai dezactivat NoClip-ul!!",
-                ["FlyEnabled"] = "Ai Activat NoClip-ul!",
+                ["FlyEnabled"] = "Ai activat NoClip-ul!",
+                ["GodDisabled"] = "Ai dezactivat GodMode-ul!",
+                ["GodEnabled"] = "Ai activat GodMode-ul!",
                 ["NoPermission"] = "Nu ai permisiunea de a folosi această comandă."
             }, this, "ro");
         }
 
-        private void LoadVariables()
+        private void InitConfig()
         {
-            defaultPos = GetConfig("Settings", "Default Teleport To Position On Disconnect", "(0, 0, 0)").ToString().ToVector3();
-            wipeSaves = Convert.ToBoolean(GetConfig("Settings", "Wipe Saved Inventories On Map Wipe", false));
-        }
+            defaultPos = GetConfig("(0, 0, 0)", "Settings", "Default Teleport To Position On Disconnect").ToVector3();
+            wipeItems = GetConfig(false, "Settings", "Wipe Saved Inventories On Map Wipe");
+            wipeSettings = GetConfig(false, "Settings", "Wipe Players Settings On Map Wipe");
+            persistentNoClip = GetConfig(false, "Settings", "Enable Persistent NoClip");
+            persistentGodMode = GetConfig(false, "Settings", "Enable Persistent GodMode");
 
-        protected override void LoadDefaultConfig()
-        {
-            PrintWarning("Creating a new configuration file");
-            Config.Clear();
-            LoadVariables();
-        }
-
-        private object GetConfig(string menu, string datavalue, object defaultValue)
-        {
-            var data = Config[menu] as Dictionary<string, object>;
-            if (data == null)
+            if (ConfigChanged)
             {
-                data = new Dictionary<string, object>();
-                Config[menu] = data;
-                Changed = true;
+                PrintWarning("Updated configuration file with new/changed values.");
+                SaveConfig();
+            }
+        }
+
+        private T GetConfig<T>(T defaultVal, params string[] path)
+        {
+            var data = Config.Get(path);
+            if (data != null)
+            {
+                return Config.ConvertValue<T>(data);
             }
 
-            object value;
-            if (!data.TryGetValue(datavalue, out value))
+            Config.Set(path.Concat(new object[] { defaultVal }).ToArray());
+            ConfigChanged = true;
+            return defaultVal;
+        }
+
+        ////////////////////////////////////////////////////////////
+        // Plugin Hooks
+        ////////////////////////////////////////////////////////////
+
+        [HookMethod(nameof(API_GetDisconnectTeleportPos))]
+        public object API_GetDisconnectTeleportPos(string userid)
+        {
+            BasePlayer player = BasePlayer.FindByID(Convert.ToUInt64(userid));
+
+            var user = LoadPlayerInfo(player);
+
+            if (user == null)
             {
-                value = defaultValue;
-                data[datavalue] = value;
-                Changed = true;
+                return null;
             }
 
-            return value;
+            return user.Teleport;
         }
 
-        private string msg(string key, string id = null, params object[] args)
+        [HookMethod(nameof(API_GetSaveInventoryStatus))]
+        public object API_GetSaveInventoryStatus(string userid)
         {
-            string message = id == null ? RemoveFormatting(lang.GetMessage(key, this, id)) : lang.GetMessage(key, this, id);
+            BasePlayer player = BasePlayer.FindByID(Convert.ToUInt64(userid));
 
-            return args.Length > 0 ? string.Format(message, args) : message;
+            var user = LoadPlayerInfo(player);
+
+            if (user == null)
+            {
+                return null;
+            }
+
+            return user.SaveInventory;
         }
 
-        private string RemoveFormatting(string source)
+        [HookMethod(nameof(API_GetUnderTerrainStatus))]
+        public object API_GetUnderTerrainStatus(string userid)
         {
-            return source.Contains(">") ? Regex.Replace(source, "<.*?>", string.Empty) : source;
+            BasePlayer player = BasePlayer.FindByID(Convert.ToUInt64(userid));
+
+            var user = LoadPlayerInfo(player);
+
+            if (user == null)
+            {
+                return null;
+            }
+
+            return user.UnderTerrain;
         }
 
-        #endregion
+        [HookMethod(nameof(API_GetNoClipStatus))]
+        public object API_GetNoClipStatus(string userid)
+        {
+            BasePlayer player = BasePlayer.FindByID(Convert.ToUInt64(userid));
+
+            var user = LoadPlayerInfo(player);
+
+            if (user == null)
+            {
+                return null;
+            }
+
+            return user.NoClip;
+        }
+
+        [HookMethod(nameof(API_GetGodModeStatus))]
+        public object API_GetGodModeStatus(string userid)
+        {
+            BasePlayer player = BasePlayer.FindByID(Convert.ToUInt64(userid));
+
+            var user = LoadPlayerInfo(player);
+
+            if (user == null)
+            {
+                return null;
+            }
+
+            return user.GodMode;
+        }
     }
 }
