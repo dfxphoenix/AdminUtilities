@@ -14,7 +14,7 @@ using Network;
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Utilities", "dFxPhoeniX", "2.1.0")]
+    [Info("Admin Utilities", "dFxPhoeniX", "2.1.2")]
     [Description("Toggle NoClip, teleport Under Terrain and more")]
     public class AdminUtilities : RustPlugin
     {
@@ -53,68 +53,202 @@ namespace Oxide.Plugins
 
         private class AdminUtilitiesItem
         {
+            public List<AdminUtilitiesItem> contents { get; set; }
             public string container { get; set; } = "main";
-            public string shortname { get; set; }
-            public int itemid { get; set; }
-            public ulong skinID { get; set; }
-            public int amount { get; set; }
-            public float condition { get; set; }
-            public float maxCondition { get; set; }
-            public int position { get; set; } = -1;
-            public float fuel { get; set; }
-            public int keyCode { get; set; }
             public int ammo { get; set; }
-            public string ammoTypeShortname { get; set; }
-            public string fogImages { get; set; }
-            public string paintImages { get; set; }
-            public List<AdminUtilitiesMod> contents { get; set; }
+            public int amount { get; set; }
+            public string ammoType { get; set; }
+            public float condition { get; set; }
+            public float fuel { get; set; }
+            public int frequency { get; set; }
+            public int itemid { get; set; }
+            public float maxCondition { get; set; }
+            public string name { get; set; }
+            public int position { get; set; } = -1;
+            public ulong skin { get; set; }
+            public string text { get; set; }
+            public int blueprintAmount { get; set; }
+            public int blueprintTarget { get; set; }
+            public int dataInt { get; set; }
+            public ulong subEntity { get; set; }
+            public bool shouldPool { get; set; }
 
             public AdminUtilitiesItem() { }
 
             public AdminUtilitiesItem(string container, Item item)
             {
-                if (item == null)
-                    return;
-
                 this.container = container;
-                shortname = ItemManager.FindItemDefinition(item.info.shortname).shortname;
                 itemid = item.info.itemid;
-                skinID = item.skin;
+                name = item.name;
+                text = item.text;
                 amount = item.amount;
                 condition = item.condition;
                 maxCondition = item.maxCondition;
-                position = item.position;
                 fuel = item.fuel;
-                keyCode = item.instanceData?.dataInt ?? 0;
-                ammo = item?.GetHeldEntity()?.GetComponent<BaseProjectile>()?.primaryMagazine?.contents ?? 0;
-                ammoTypeShortname = item.GetHeldEntity()?.GetComponent<BaseProjectile>()?.primaryMagazine?.ammoType?.shortname ?? null;
+                position = item.position;
+                skin = item.skin;
+
+                if (item.instanceData != null)
+                {
+                    dataInt = item.instanceData.dataInt;
+                    blueprintAmount = item.instanceData.blueprintAmount;
+                    blueprintTarget = item.instanceData.blueprintTarget;
+                    subEntity = item.instanceData.subEntity.Value;
+                    shouldPool = item.instanceData.ShouldPool;
+                }
+
+                if (item.GetHeldEntity() is HeldEntity e)
+                {
+                    if (e is BaseProjectile baseProjectile)
+                    {
+                        ammo = baseProjectile.primaryMagazine.contents;
+                        ammoType = baseProjectile.primaryMagazine.ammoType.shortname;
+                    }
+                    else if (e is FlameThrower flameThrower)
+                    {
+                        ammo = flameThrower.ammo;
+                    }
+                }
+
+                if (ItemModAssociatedEntity<PagerEntity>.GetAssociatedEntity(item) is PagerEntity pagerEntity)
+                {
+                    frequency = pagerEntity.GetFrequency();
+                }
 
                 if (item.contents?.itemList?.Count > 0)
                 {
-                    contents = new List<AdminUtilitiesMod>();
+                    contents = new();
 
                     foreach (var mod in item.contents.itemList)
                     {
-                        contents.Add(new AdminUtilitiesMod
-                        {
-                            shortname = mod.info.shortname,
-                            amount = mod.amount,
-                            condition = mod.condition,
-                            maxCondition = mod.maxCondition,
-                            itemid = mod.info.itemid
-                        });
+                        contents.Add(new("default", mod));
                     }
                 }
             }
-        }
 
-        private class AdminUtilitiesMod
-        {
-            public string shortname { get; set; }
-            public int amount { get; set; }
-            public float condition { get; set; }
-            public float maxCondition { get; set; }
-            public int itemid { get; set; }
+            public static Item Create(AdminUtilitiesItem aui)
+            {
+                if (aui.itemid == 0 || string.IsNullOrEmpty(aui.container))
+                {
+                    return null;
+                }
+
+                Item item;
+                if (aui.blueprintTarget != 0)
+                {
+                    item = ItemManager.Create(Workbench.GetBlueprintTemplate());
+                    item.blueprintTarget = aui.blueprintTarget;
+                    item.amount = aui.blueprintAmount;
+                }
+                else item = ItemManager.CreateByItemID(aui.itemid, aui.amount, aui.skin);
+
+                if (item == null)
+                {
+                    return null;
+                }
+
+                if (aui.blueprintAmount != 0 || aui.blueprintTarget != 0 || aui.dataInt != 0 || aui.subEntity != 0)
+                {
+                    item.instanceData = aui.shouldPool ? Pool.Get<ProtoBuf.Item.InstanceData>() : new ProtoBuf.Item.InstanceData();
+                    item.instanceData.ShouldPool = aui.shouldPool;
+                    item.instanceData.blueprintAmount = aui.blueprintAmount;
+                    item.instanceData.blueprintTarget = aui.blueprintTarget;
+                    item.instanceData.dataInt = aui.dataInt;
+                    item.instanceData.subEntity = new(aui.subEntity);
+                }
+
+                if (!string.IsNullOrEmpty(aui.name))
+                {
+                    item.name = aui.name;
+                }
+
+                if (!string.IsNullOrEmpty(aui.text))
+                {
+                    item.text = aui.text;
+                }
+
+                if (item.GetHeldEntity() is HeldEntity e)
+                {
+                    if (item.skin != 0)
+                    {
+                        e.skinID = item.skin;
+                    }
+
+                    if (e is BaseProjectile baseProjectile)
+                    {
+                        baseProjectile.DelayedModsChanged();
+                        baseProjectile.primaryMagazine.contents = aui.ammo;
+                        if (!string.IsNullOrEmpty(aui.ammoType))
+                        {
+                            baseProjectile.primaryMagazine.ammoType = ItemManager.FindItemDefinition(aui.ammoType);
+                        }
+                    }
+                    else if (e is FlameThrower flameThrower)
+                    {
+                        flameThrower.ammo = aui.ammo;
+                    }
+                    else if (e is Chainsaw chainsaw)
+                    {
+                        chainsaw.ammo = aui.ammo;
+                    }
+
+                    e.SendNetworkUpdate();
+                }
+
+                if (aui.frequency > 0 && item.info.GetComponentInChildren<ItemModRFListener>() is ItemModRFListener rfListener)
+                {
+                    if (item.instanceData.subEntity.IsValid && BaseNetworkable.serverEntities.Find(item.instanceData.subEntity) is PagerEntity pagerEntity)
+                    {
+                        pagerEntity.ChangeFrequency(aui.frequency);
+                    }
+                }
+
+                if (aui.contents != null)
+                {
+                    foreach (var aum in aui.contents)
+                    {
+                        Item mod = Create(aum);
+
+                        if (mod != null && !mod.MoveToContainer(item.contents))
+                        {
+                            mod.Remove();
+                        }
+                    }
+                }
+
+                if (item.hasCondition)
+                {
+                    item._maxCondition = aui.maxCondition;
+                    item._condition = aui.condition;
+                }
+
+                item.fuel = aui.fuel;
+                item.MarkDirty();
+
+                return item;
+            }
+
+            public static void Restore(BasePlayer player, AdminUtilitiesItem aui)
+            {
+                Item item = Create(aui);
+
+                if (item == null)
+                {
+                    return;
+                }
+
+                ItemContainer newcontainer = aui.container switch
+                {
+                    "belt" => player.inventory.containerBelt,
+                    "wear" => player.inventory.containerWear,
+                    "main" or _ => player.inventory.containerMain,
+                };
+
+                if (!item.MoveToContainer(newcontainer, aui.position, true))
+                {
+                    player.GiveItem(item);
+                }
+            }
         }
 
         private PlayerInfo LoadPlayerInfo(BasePlayer player)
@@ -434,7 +568,11 @@ namespace Oxide.Plugins
 
             if (HasPermission(player, permInventory) && user.SaveInventory && userItems.Items.Count > 0)
             {
-                if (player.inventory.AllItems().Length == 2)
+                List<Item> items = Pool.Get<List<Item>>();
+                int count = player.inventory.GetAllItems(items);
+                Pool.FreeUnmanaged(ref items);
+				
+                if (count == 2)
                 {
                     if (player.inventory.GetAmount(ItemManager.FindItemDefinition("rock").itemid) == 1)
                     {
@@ -451,7 +589,7 @@ namespace Oxide.Plugins
                     {
                         if (aui.amount > 0)
                         {
-                            RestoreItem(player, aui);
+                            AdminUtilitiesItem.Restore(player, aui);
                         }
                     }
                 }
@@ -697,7 +835,11 @@ namespace Oxide.Plugins
             if (!HasPermission(player, permInventory) || !user.SaveInventory)
                 return;
 
-            if (player.inventory.AllItems().Length == 0)
+            List<Item> itemList = Pool.Get<List<Item>>();
+            int num = player.inventory.GetAllItems(itemList);
+            Pool.FreeUnmanaged(ref itemList);
+
+            if (num == 0)
             {
                 userItems.Items.Clear();
                 SavePlayerInfoItems(player, userItems);
@@ -730,86 +872,6 @@ namespace Oxide.Plugins
             }
 
             container.itemList.Clear();
-        }
-
-        private void RestoreItem(BasePlayer player, AdminUtilitiesItem aui)
-        {
-            if (aui.itemid == 0 || aui.amount < 1 || string.IsNullOrEmpty(aui.container))
-                return;
-
-            Item item = ItemManager.CreateByItemID(aui.itemid, aui.amount, aui.skinID);
-
-            if (item == null)
-                return;
-
-            if (item.hasCondition)
-            {
-                item.maxCondition = aui.maxCondition;
-                item.condition = aui.condition;
-            }
-
-            item.fuel = aui.fuel;
-
-            var heldEntity = item.GetHeldEntity();
-
-            if (heldEntity != null)
-            {
-                if (item.skin != 0)
-                    heldEntity.skinID = item.skin;
-
-                var weapon = heldEntity as BaseProjectile;
-
-                if (weapon != null)
-                {
-                    if (!string.IsNullOrEmpty(aui.ammoTypeShortname))
-                    {
-                        weapon.primaryMagazine.ammoType = ItemManager.FindItemDefinition(aui.ammoTypeShortname);
-                    }
-
-                    weapon.primaryMagazine.contents = 0;
-                    weapon.SendNetworkUpdateImmediate(false);
-                    weapon.primaryMagazine.contents = aui.ammo;
-                    weapon.SendNetworkUpdateImmediate(false);
-                }
-            }
-
-            if (aui.contents != null)
-            {
-                foreach (var aum in aui.contents)
-                {
-                    Item mod = ItemManager.CreateByItemID(aum.itemid, 1);
-
-                    if (mod == null)
-                        continue;
-
-                    if (mod.hasCondition)
-                    {
-                        mod.maxCondition = aum.maxCondition;
-                        mod.condition = aum.condition;
-                    }
-
-                    item.contents.AddItem(mod.info, Math.Max(aum.amount, 1));
-                }
-            }
-
-            if (aui.keyCode != 0)
-            {
-                item.instanceData = Pool.Get<ProtoBuf.Item.InstanceData>();
-                item.instanceData.ShouldPool = false;
-                item.instanceData.dataInt = aui.keyCode;
-            }
-
-            item.MarkDirty();
-
-            var container = aui.container == "belt" ? player.inventory.containerBelt : aui.container == "wear" ? player.inventory.containerWear : player.inventory.containerMain;
-
-            if (!item.MoveToContainer(container, aui.position, true))
-            {
-                if (!item.MoveToContainer(player.inventory.containerMain, -1, true))
-                {
-                    item.Remove();
-                }
-            }
         }
 
         private bool HasPermission(BasePlayer player, string permName)
