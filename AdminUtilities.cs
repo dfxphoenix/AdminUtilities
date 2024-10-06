@@ -14,7 +14,7 @@ using Network;
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Utilities", "dFxPhoeniX", "2.1.2")]
+    [Info("Admin Utilities", "dFxPhoeniX", "2.1.4")]
     [Description("Toggle NoClip, teleport Under Terrain and more")]
     public class AdminUtilities : RustPlugin
     {
@@ -345,31 +345,10 @@ namespace Oxide.Plugins
         {
             foreach (var player in BasePlayer.activePlayerList)
             {
-                if (!HasPermission(player, permNoClip) && player.IsFlying)
-                {
-                    player.SendConsoleCommand("noclip");
+                PlayerInfo user = LoadPlayerInfo(player);
 
-                    PlayerInfo user = LoadPlayerInfo(player);
-
-                    if (user == null)
-                        return;
-
-                    user.NoClip = false;
-                    SavePlayerInfo(player, user);
-                }
-
-                if (!HasPermission(player, permGodMode) && player.IsGod())
-                {
-                    player.SendConsoleCommand("setinfo \"global.god\" \"False\"");
-
-                    PlayerInfo user = LoadPlayerInfo(player);
-
-                    if (user == null)
-                        return;
-
-                    user.GodMode = false;
-                    SavePlayerInfo(player, user);
-                }
+                if (user == null)
+                    return;
 
                 timer.Once(0.2f, () => {
                     if (player.IsDeveloper && !(player.IsFlying || player.IsGod()))
@@ -390,11 +369,16 @@ namespace Oxide.Plugins
             if (player == null)
                 return null;
 
+            PlayerInfo user = LoadPlayerInfo(player);
+
+            if (user == null)
+                return null;
+
             string lowerCommand = command.ToLower();
 
-            if (lowerCommand.Contains("god") && lowerCommand.Contains("true"))
+            if (lowerCommand.Contains("god"))
             {
-                if (!HasPermission(player, permGodMode))
+                if (!HasPermission(player, permGodMode) && !user.GodMode && !player.IsGod())
                     return false;
             }
 
@@ -467,6 +451,18 @@ namespace Oxide.Plugins
             if (user == null)
                 return;
 
+            if (!HasPermission(player, permNoClip) && user.NoClip)
+            {
+                user.NoClip = false;
+                SavePlayerInfo(player, user);
+            }
+
+            if (!HasPermission(player, permGodMode) && user.GodMode)
+            {
+                user.GodMode = false;
+                SavePlayerInfo(player, user);
+            }
+
             if (!persistentNoClip && user.NoClip)
             {
                 user.NoClip = false;
@@ -484,25 +480,13 @@ namespace Oxide.Plugins
 
             if (HasPermission(player, permTerrain))
             {
-                var userTeleport = user.Teleport.ToVector3();
-                var position = userTeleport == Vector3.zero ? defaultPos : userTeleport;
-
-                if (position == Vector3.zero)
-                {
-                    position = new Vector3(player.transform.position.x, TerrainMeta.HeightMap.GetHeight(player.transform.position) - 5f, player.transform.position.z);
-                }
-
-                player.Teleport(position);
-
-                UnderTerrain(player);
+                DisconnectTeleport(player);
             }
 
-            PlayerInfoItems userItems = LoadPlayerInfoItems(player);
-
-            if (userItems == null)
-                return;
-
-            SaveInventory(player, user, userItems);
+            if (HasPermission(player, permInventory) && user.SaveInventory)
+            {
+                SaveInventory(player);
+            }
         }
 
         private void OnPlayerConnected(BasePlayer player)
@@ -571,7 +555,7 @@ namespace Oxide.Plugins
                 List<Item> items = Pool.Get<List<Item>>();
                 int count = player.inventory.GetAllItems(items);
                 Pool.FreeUnmanaged(ref items);
-				
+
                 if (count == 2)
                 {
                     if (player.inventory.GetAmount(ItemManager.FindItemDefinition("rock").itemid) == 1)
@@ -700,6 +684,37 @@ namespace Oxide.Plugins
                 return;
             }
 
+            ToggleNoClip(player);
+        }
+
+        [ChatCommand("god")]
+        private void cmdGodMode(BasePlayer player, string command, string[] args)
+        {
+            if (!HasPermission(player, permGodMode))
+            {
+                Player.Message(player, msg("NoPermission", player.UserIDString));
+                return;
+            }
+
+            ToggleGodMode(player);
+        }
+
+        ////////////////////////////////////////////////////////////
+        // General Methods
+        ////////////////////////////////////////////////////////////
+
+        private bool GetSave()
+        {
+            if (newSave || BuildingManager.server.buildingDictionary.Count == 0)
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        private void ToggleNoClip(BasePlayer player)
+        {
             PlayerInfo user = LoadPlayerInfo(player);
 
             if (user == null)
@@ -723,15 +738,8 @@ namespace Oxide.Plugins
             SavePlayerInfo(player, user);
         }
 
-        [ChatCommand("god")]
-        private void cmdGodMode(BasePlayer player, string command, string[] args)
+        private void ToggleGodMode(BasePlayer player)
         {
-            if (!HasPermission(player, permGodMode))
-            {
-                Player.Message(player, msg("NoPermission", player.UserIDString));
-                return;
-            }
-
             PlayerInfo user = LoadPlayerInfo(player);
 
             if (user == null)
@@ -755,26 +763,22 @@ namespace Oxide.Plugins
             SavePlayerInfo(player, user);
         }
 
-        ////////////////////////////////////////////////////////////
-        // General Methods
-        ////////////////////////////////////////////////////////////
-
-        private bool GetSave()
-        {
-            if (newSave || BuildingManager.server.buildingDictionary.Count == 0)
-            {
-                return true;
-            }
-
-            return false;
-        }
-
-        private void UnderTerrain(BasePlayer player)
+        private void DisconnectTeleport(BasePlayer player)
         {
             PlayerInfo user = LoadPlayerInfo(player);
 
             if (user == null)
                 return;
+
+            var userTeleport = user.Teleport.ToVector3();
+            var position = userTeleport == Vector3.zero ? defaultPos : userTeleport;
+
+            if (position == Vector3.zero)
+            {
+                position = new Vector3(player.transform.position.x, TerrainMeta.HeightMap.GetHeight(player.transform.position) - 5f, player.transform.position.z);
+            }
+
+            player.Teleport(position);
 
             float terrainHeight = TerrainMeta.HeightMap.GetHeight(player.transform.position);
             bool isUnderTerrain = player.transform.position.y < terrainHeight || player.IsHeadUnderwater();
@@ -830,9 +834,11 @@ namespace Oxide.Plugins
             return $"{x} {y} {z}";
         }
 
-        private void SaveInventory(BasePlayer player, PlayerInfo user, PlayerInfoItems userItems)
+        private void SaveInventory(BasePlayer player)
         {
-            if (!HasPermission(player, permInventory) || !user.SaveInventory)
+            PlayerInfoItems userItems = LoadPlayerInfoItems(player);
+
+            if (userItems == null)
                 return;
 
             List<Item> itemList = Pool.Get<List<Item>>();
@@ -972,10 +978,26 @@ namespace Oxide.Plugins
         // Plugin Hooks
         ////////////////////////////////////////////////////////////
 
+        [HookMethod(nameof(API_ToggleNoClip))]
+        public void API_ToggleNoClip(BasePlayer player)
+        {
+            ToggleNoClip(player);
+        }
+
+        [HookMethod(nameof(API_ToggleGodMode))]
+        public void API_ToggleGodMode(BasePlayer player)
+        {
+            ToggleGodMode(player);
+        }
+
         [HookMethod(nameof(API_GetDisconnectTeleportPos))]
         public object API_GetDisconnectTeleportPos(string userid)
         {
             BasePlayer player = BasePlayer.FindByID(Convert.ToUInt64(userid));
+
+            if (player == null)
+                return null;
+
             PlayerInfo user = LoadPlayerInfo(player);
 
             if (user == null)
@@ -985,49 +1007,65 @@ namespace Oxide.Plugins
         }
 
         [HookMethod(nameof(API_GetSaveInventoryStatus))]
-        public object API_GetSaveInventoryStatus(string userid)
+        public bool API_GetSaveInventoryStatus(string userid)
         {
             BasePlayer player = BasePlayer.FindByID(Convert.ToUInt64(userid));
+
+            if (player == null)
+                return false;
+
             PlayerInfo user = LoadPlayerInfo(player);
 
             if (user == null)
-                return null;
+                return false;
 
             return user.SaveInventory;
         }
 
         [HookMethod(nameof(API_GetUnderTerrainStatus))]
-        public object API_GetUnderTerrainStatus(string userid)
+        public bool API_GetUnderTerrainStatus(string userid)
         {
             BasePlayer player = BasePlayer.FindByID(Convert.ToUInt64(userid));
+
+            if (player == null)
+                return false;
+
             PlayerInfo user = LoadPlayerInfo(player);
 
             if (user == null)
-                return null;
+                return false;
 
             return user.UnderTerrain;
         }
 
         [HookMethod(nameof(API_GetNoClipStatus))]
-        public object API_GetNoClipStatus(string userid)
+        public bool API_GetNoClipStatus(string userid)
         {
             BasePlayer player = BasePlayer.FindByID(Convert.ToUInt64(userid));
+
+            if (player == null)
+                return false;
+
             PlayerInfo user = LoadPlayerInfo(player);
 
             if (user == null)
-                return null;
+                return false;
 
             return user.NoClip;
         }
 
         [HookMethod(nameof(API_GetGodModeStatus))]
-        public object API_GetGodModeStatus(string userid)
+        public bool API_GetGodModeStatus(string userid)
         {
             BasePlayer player = BasePlayer.FindByID(Convert.ToUInt64(userid));
+
+            if (player == null)
+                return false;
+
             PlayerInfo user = LoadPlayerInfo(player);
 
             if (user == null)
-                return null;
+                return false;
 
             return user.GodMode;
         }
