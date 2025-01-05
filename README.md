@@ -8,7 +8,7 @@ This plugin is the only plugin that offers a premium and identical experience to
 * ``adminutilities.disconnectteleport`` - Allow group/player to teleport under terrain or custom coordonates on disconnect.
 * ``adminutilities.saveinventory`` - Allow group/player to save inventory on disconnect.
 * ``adminutilities.maxhht`` - Allow group/player to give max metabolism on connect.
-## Server Commands
+## Chat Commands
 * ``/noclip`` - Enable/Disable the noclip mode (require adminutilities.nocliptoggle).
 * ``/god`` - Enable/Disable the god mode (require adminutilities.godmodetoggle).
 * ``/disconnectteleport`` - Show personal disconnect teleport's options (require adminutilities.disconnectteleport).
