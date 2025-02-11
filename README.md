@@ -30,7 +30,7 @@ This plugin is the only plugin that offers a premium and identical experience to
 ```
 
 ## Languages
-**Admin Utilities** have two languages by default (**English** and **Romanian**), but you can add more in Oxide lang folder
+**Admin Utilities** have two languages by default (**English** and **Romanian**), but you can add more in Oxide lang folder.
 
 ## API Hooks
 ```csharp
