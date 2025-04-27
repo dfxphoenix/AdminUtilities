@@ -21,8 +21,8 @@ This plugin is the only plugin that offers a premium and identical experience to
 {
   "Settings": {
     "Default Teleport To Position On Disconnect": "(0, 0, 0)",
-    "Enable Persistent GodMode": false,
-    "Enable Persistent NoClip": false,
+    "Enable Persistent GodMode": false,
+    "Enable Persistent NoClip": false,
     "Wipe Players Settings On Map Wipe": false,
     "Wipe Saved Inventories On Map Wipe": false
   }
