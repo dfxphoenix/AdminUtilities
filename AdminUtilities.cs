@@ -871,7 +871,7 @@ namespace Oxide.Plugins
 
         private void AddItemsFromContainer(ItemContainer container, string containerName, List<AdminUtilitiesItem> items)
         {
-            foreach (Item item in container.itemList)
+            foreach (Item item in container.itemList.ToList())
             {
                 items.Add(new AdminUtilitiesItem(containerName, item));
                 item.Remove();
