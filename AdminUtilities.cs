@@ -14,7 +14,7 @@ using Network;
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Utilities", "dFxPhoeniX", "2.1.6")]
+    [Info("Admin Utilities", "dFxPhoeniX", "2.1.8")]
     [Description("Toggle NoClip, teleport Under Terrain and more")]
     public class AdminUtilities : RustPlugin
     {
@@ -26,6 +26,8 @@ namespace Oxide.Plugins
 
         private DataFileSystem dataFile;
         private DataFileSystem dataFileItems;
+
+        private readonly HashSet<ulong> pendingForceNoClip = new HashSet<ulong>();
 
         private bool newSave;
 
@@ -346,16 +348,25 @@ namespace Oxide.Plugins
             foreach (var player in BasePlayer.activePlayerList)
             {
                 PlayerInfo user = LoadPlayerInfo(player);
-
                 if (user == null)
-                    return;
+                    continue;
 
-                timer.Once(0.2f, () => {
-                    if (player.IsDeveloper && !(player.IsFlying || player.IsGod()))
-                    {
-                        player.SetPlayerFlag(BasePlayer.PlayerFlags.IsDeveloper, false);
-                    }
-                });
+                if (!player.IsFlying && user.NoClip)
+                {
+                    user.NoClip = false;
+                    SavePlayerInfo(player, user);
+                }
+
+                if (!player.IsGod() && user.GodMode)
+                {
+                    user.GodMode = false;
+                    SavePlayerInfo(player, user);
+                }
+
+                if (player.IsDeveloper && !player.IsFlying && !player.IsGod())
+                {
+                    player.SetPlayerFlag(BasePlayer.PlayerFlags.IsDeveloper, false);
+                }
             }
         }
 
@@ -376,13 +387,42 @@ namespace Oxide.Plugins
 
             string lowerCommand = command.ToLower();
 
-            if (lowerCommand.Contains("god"))
+            if (lowerCommand.Contains("setinfo \"global.god\" \"True\""))
             {
                 if (!HasPermission(player, permGodMode) && !user.GodMode && !player.IsGod())
+                {
                     return false;
+                }
             }
 
             return null;
+        }
+
+        private void OnPlayerTick(BasePlayer player)
+        {
+            if (player == null || !player.IsConnected) return;
+            if (player.IsNpc || (player is NPCPlayer)) return;
+
+            var user = LoadPlayerInfo(player);
+            if (user == null) return;
+
+            if (!HasPermission(player, permNoClip) && !user.NoClip && player.IsFlying)
+            {
+                if (pendingForceNoClip.Contains(player.userID))
+                    return;
+
+                pendingForceNoClip.Add(player.userID);
+
+                timer.Once(0.05f, () =>
+                {
+                    if (player == null || !player.IsConnected) return;
+
+                    pendingForceNoClip.Remove(player.userID);
+
+                    if (!HasPermission(player, permNoClip) && player.IsFlying)
+                        player.SendConsoleCommand("noclip");
+                });
+            }
         }
 
         private void OnServerInitialized()
@@ -446,6 +486,9 @@ namespace Oxide.Plugins
 
         private void OnPlayerDisconnected(BasePlayer player, string reason)
         {
+
+            pendingForceNoClip.Remove(player.userID);
+
             PlayerInfo user = LoadPlayerInfo(player);
 
             if (user == null)
