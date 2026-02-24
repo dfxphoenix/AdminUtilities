@@ -14,7 +14,7 @@ using Network;
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Utilities", "dFxPhoeniX", "2.1.8")]
+    [Info("Admin Utilities", "dFxPhoeniX", "2.1.9")]
     [Description("Toggle NoClip, teleport Under Terrain and more")]
     public class AdminUtilities : RustPlugin
     {
@@ -59,6 +59,9 @@ namespace Oxide.Plugins
             public string container { get; set; } = "main";
             public int ammo { get; set; }
             public int amount { get; set; }
+            public int flags { get; set; }
+            public int containerSlots { get; set; }
+            public bool hasInstanceData { get; set; }
             public string ammoType { get; set; }
             public float condition { get; set; }
             public float fuel { get; set; }
@@ -89,7 +92,9 @@ namespace Oxide.Plugins
                 fuel = item.fuel;
                 position = item.position;
                 skin = item.skin;
+                flags = (int)item.flags;
 
+                hasInstanceData = item.instanceData != null;
                 if (item.instanceData != null)
                 {
                     dataInt = item.instanceData.dataInt;
@@ -99,12 +104,24 @@ namespace Oxide.Plugins
                     shouldPool = item.instanceData.ShouldPool;
                 }
 
+                if (item.contents != null)
+                {
+                    containerSlots = item.contents.capacity;
+
+                    if (item.contents.itemList != null && item.contents.itemList.Count > 0)
+                    {
+                        contents = new();
+                        foreach (var mod in item.contents.itemList)
+                            contents.Add(new("default", mod));
+                    }
+                }
+
                 if (item.GetHeldEntity() is HeldEntity e)
                 {
                     if (e is BaseProjectile baseProjectile)
                     {
                         ammo = baseProjectile.primaryMagazine.contents;
-                        ammoType = baseProjectile.primaryMagazine.ammoType.shortname;
+                        ammoType = baseProjectile.primaryMagazine.ammoType?.shortname;
                     }
                     else if (e is FlameThrower flameThrower)
                     {
@@ -116,24 +133,12 @@ namespace Oxide.Plugins
                 {
                     frequency = pagerEntity.GetFrequency();
                 }
-
-                if (item.contents?.itemList?.Count > 0)
-                {
-                    contents = new();
-
-                    foreach (var mod in item.contents.itemList)
-                    {
-                        contents.Add(new("default", mod));
-                    }
-                }
             }
 
-            public static Item Create(AdminUtilitiesItem aui)
+            public static Item Create(AdminUtilitiesItem aui, bool restoreContents = true)
             {
                 if (aui.itemid == 0 || string.IsNullOrEmpty(aui.container))
-                {
                     return null;
-                }
 
                 Item item;
                 if (aui.blueprintTarget != 0)
@@ -144,12 +149,11 @@ namespace Oxide.Plugins
                 }
                 else item = ItemManager.CreateByItemID(aui.itemid, aui.amount, aui.skin);
 
-                if (item == null)
-                {
-                    return null;
-                }
+                if (item == null) return null;
 
-                if (aui.blueprintAmount != 0 || aui.blueprintTarget != 0 || aui.dataInt != 0 || aui.subEntity != 0)
+                item.flags = (Item.Flag)aui.flags;
+
+                if (aui.hasInstanceData)
                 {
                     item.instanceData = aui.shouldPool ? Pool.Get<ProtoBuf.Item.InstanceData>() : new ProtoBuf.Item.InstanceData();
                     item.instanceData.ShouldPool = aui.shouldPool;
@@ -159,63 +163,40 @@ namespace Oxide.Plugins
                     item.instanceData.subEntity = new(aui.subEntity);
                 }
 
-                if (!string.IsNullOrEmpty(aui.name))
-                {
-                    item.name = aui.name;
-                }
-
-                if (!string.IsNullOrEmpty(aui.text))
-                {
-                    item.text = aui.text;
-                }
+                if (!string.IsNullOrEmpty(aui.name)) item.name = aui.name;
+                if (!string.IsNullOrEmpty(aui.text)) item.text = aui.text;
 
                 if (item.GetHeldEntity() is HeldEntity e)
                 {
-                    if (item.skin != 0)
-                    {
-                        e.skinID = item.skin;
-                    }
+                    if (item.skin != 0) e.skinID = item.skin;
 
-                    if (e is BaseProjectile baseProjectile)
+                    if (e is BaseProjectile bp)
                     {
-                        baseProjectile.DelayedModsChanged();
-                        baseProjectile.primaryMagazine.contents = aui.ammo;
+                        bp.primaryMagazine.contents = aui.ammo;
                         if (!string.IsNullOrEmpty(aui.ammoType))
-                        {
-                            baseProjectile.primaryMagazine.ammoType = ItemManager.FindItemDefinition(aui.ammoType);
-                        }
+                            bp.primaryMagazine.ammoType = ItemManager.FindItemDefinition(aui.ammoType);
+                        bp.DelayedModsChanged();
                     }
-                    else if (e is FlameThrower flameThrower)
-                    {
-                        flameThrower.ammo = aui.ammo;
-                    }
-                    else if (e is Chainsaw chainsaw)
-                    {
-                        chainsaw.ammo = aui.ammo;
-                    }
+                    else if (e is FlameThrower ft) ft.ammo = aui.ammo;
+                    else if (e is Chainsaw cs) cs.ammo = aui.ammo;
 
                     e.SendNetworkUpdate();
                 }
 
-                if (aui.frequency > 0 && item.info.GetComponentInChildren<ItemModRFListener>() is ItemModRFListener rfListener)
+                if (aui.frequency > 0 && item.info.GetComponentInChildren<ItemModRFListener>() != null)
                 {
-                    if (item.instanceData.subEntity.IsValid && BaseNetworkable.serverEntities.Find(item.instanceData.subEntity) is PagerEntity pagerEntity)
+                    if (item.instanceData != null && item.instanceData.subEntity.IsValid &&
+                        BaseNetworkable.serverEntities.Find(item.instanceData.subEntity) is PagerEntity pagerEntity)
                     {
                         pagerEntity.ChangeFrequency(aui.frequency);
                     }
                 }
 
-                if (aui.contents != null)
+                if (restoreContents)
                 {
-                    foreach (var aum in aui.contents)
-                    {
-                        Item mod = Create(aum);
-
-                        if (mod != null && !mod.MoveToContainer(item.contents))
-                        {
-                            mod.Remove();
-                        }
-                    }
+                    var slots = System.Math.Max(aui.containerSlots, aui.contents?.Count ?? 0);
+                    EnsureContainer(item, slots);
+                    RestoreContents(null, item, aui.contents);
                 }
 
                 if (item.hasCondition)
@@ -226,30 +207,88 @@ namespace Oxide.Plugins
 
                 item.fuel = aui.fuel;
                 item.MarkDirty();
-
                 return item;
+            }
+
+            private static T FindItemMod<T>(Item item) where T : ItemMod
+            {
+                var mods = item?.info?.itemMods;
+                if (mods == null) return null;
+
+                foreach (var m in mods)
+                    if (m is T t) return t;
+
+                return null;
+            }
+
+            private static void EnsureContainer(Item item, int slots)
+            {
+                if (item == null || slots <= 0) return;
+
+                // Armor inserts container
+                var armorSlot = FindItemMod<ItemModContainerArmorSlot>(item);
+                if (armorSlot != null)
+                {
+                    armorSlot.CreateAtCapacity(slots, item);
+                    return;
+                }
+
+                // fallback generic container
+                if (item.contents == null)
+                {
+                    item.contents = Pool.Get<ItemContainer>();
+                    item.contents.ServerInitialize(item, slots);
+                    if (!item.contents.uid.IsValid)
+                        item.contents.GiveUID();
+                }
+            }
+
+            private static void RestoreContents(BasePlayer player, Item parent, List<AdminUtilitiesItem> saved)
+            {
+                if (saved == null || saved.Count == 0) return;
+                if (parent?.contents == null) return;
+
+                foreach (var aum in saved)
+                {
+                    var mod = Create(aum, true);
+                    if (mod == null) continue;
+
+                    if (mod.MoveToContainer(parent.contents, aum.position, true) || mod.MoveToContainer(parent.contents))
+                        continue;
+
+                    if (player != null) player.GiveItem(mod);
+                    else mod.Remove();
+                }
+
+                parent.contents.MarkDirty();
             }
 
             public static void Restore(BasePlayer player, AdminUtilitiesItem aui)
             {
-                Item item = Create(aui);
+                Item item = Create(aui, restoreContents: false);
+                if (item == null) return;
 
-                if (item == null)
-                {
-                    return;
-                }
-
-                ItemContainer newcontainer = aui.container switch
+                ItemContainer target = aui.container switch
                 {
                     "belt" => player.inventory.containerBelt,
                     "wear" => player.inventory.containerWear,
                     "main" or _ => player.inventory.containerMain,
                 };
 
-                if (!item.MoveToContainer(newcontainer, aui.position, true))
+                bool moved = item.MoveToContainer(target, aui.position, true);
+                if (!moved) player.GiveItem(item);
+
+                var slots = System.Math.Max(aui.containerSlots, aui.contents?.Count ?? 0);
+                EnsureContainer(item, slots);
+                RestoreContents(player, item, aui.contents);
+
+                if (item.GetHeldEntity() is BaseProjectile bp)
                 {
-                    player.GiveItem(item);
+                    bp.DelayedModsChanged();
+                    bp.SendNetworkUpdate();
                 }
+
+                item.MarkDirty();
             }
         }
 
@@ -660,37 +699,37 @@ namespace Oxide.Plugins
                 switch (args[0].ToLower())
                 {
                     case "set":
-                    {
-                        if (args.Length == 4 && float.TryParse(args[1], out float x) && float.TryParse(args[2], out float y) && float.TryParse(args[3], out float z))
                         {
-                            var customPos = new Vector3(x, y, z);
-
-                            if (Vector3.Distance(customPos, Vector3.zero) <= TerrainMeta.Size.x / 1.5f && customPos.y > -100f && customPos.y < 4400f)
+                            if (args.Length == 4 && float.TryParse(args[1], out float x) && float.TryParse(args[2], out float y) && float.TryParse(args[3], out float z))
                             {
-                                user.Teleport = customPos.ToString();
-                                Player.Message(player, msg("PositionAdded", player.UserIDString, FormatPosition(customPos)));
+                                var customPos = new Vector3(x, y, z);
+
+                                if (Vector3.Distance(customPos, Vector3.zero) <= TerrainMeta.Size.x / 1.5f && customPos.y > -100f && customPos.y < 4400f)
+                                {
+                                    user.Teleport = customPos.ToString();
+                                    Player.Message(player, msg("PositionAdded", player.UserIDString, FormatPosition(customPos)));
+                                }
+                                else
+                                {
+                                    Player.Message(player, msg("OutOfBounds", player.UserIDString));
+                                }
                             }
                             else
                             {
-                                Player.Message(player, msg("OutOfBounds", player.UserIDString));
+                                Player.Message(player, msg("DisconnectTeleportSet", player.UserIDString, FormatPosition(user.Teleport.ToVector3())));
                             }
-                        }
-                        else
-                        {
-                            Player.Message(player, msg("DisconnectTeleportSet", player.UserIDString, FormatPosition(user.Teleport.ToVector3())));
-                        }
 
-                        SavePlayerInfo(player, user);
-                        return;
-                    }
+                            SavePlayerInfo(player, user);
+                            return;
+                        }
                     case "reset":
-                    {
-                        user.Teleport = defaultPos.ToString();
-                        string message = defaultPos != Vector3.zero ? msg("PositionRemoved2", player.UserIDString, defaultPos) : msg("PositionRemoved1", player.UserIDString);
-                        Player.Message(player, message);
-                        SavePlayerInfo(player, user);
-                        return;
-                    }
+                        {
+                            user.Teleport = defaultPos.ToString();
+                            string message = defaultPos != Vector3.zero ? msg("PositionRemoved2", player.UserIDString, defaultPos) : msg("PositionRemoved1", player.UserIDString);
+                            Player.Message(player, message);
+                            SavePlayerInfo(player, user);
+                            return;
+                        }
                 }
             }
 
@@ -1046,7 +1085,7 @@ namespace Oxide.Plugins
             if (user == null)
                 return null;
 
-           return user.Teleport;
+            return user.Teleport;
         }
 
         [HookMethod(nameof(API_GetSaveInventoryStatus))]
