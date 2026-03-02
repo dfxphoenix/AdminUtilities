@@ -14,7 +14,7 @@ using Network;
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Utilities", "dFxPhoeniX", "2.1.9")]
+    [Info("Admin Utilities", "dFxPhoeniX", "2.2.0")]
     [Description("Toggle NoClip, teleport Under Terrain and more")]
     public class AdminUtilities : RustPlugin
     {
@@ -294,66 +294,42 @@ namespace Oxide.Plugins
 
         private PlayerInfo LoadPlayerInfo(BasePlayer player)
         {
-            if (dataFile == null)
-                return null;
+            if (dataFile == null || player == null) return null;
 
-            if (playerInfoCache.ContainsKey(player.UserIDString))
-            {
-                return playerInfoCache[player.UserIDString];
-            }
-            else
-            {
-                PlayerInfo user = dataFile.ReadObject<PlayerInfo>($"{player.UserIDString}");
+            if (playerInfoCache.TryGetValue(player.UserIDString, out var cached))
+                return cached;
 
-                playerInfoCache[player.UserIDString] = user;
-
-                return user;
-            }
+            var user = dataFile.ReadObject<PlayerInfo>(player.UserIDString) ?? new PlayerInfo();
+            playerInfoCache[player.UserIDString] = user;
+            return user;
         }
 
         private void SavePlayerInfo(BasePlayer player, PlayerInfo playerInfo)
         {
-            if (dataFile == null)
-                return;
+            if (dataFile == null) return;
 
-            dataFile.WriteObject<PlayerInfo>($"{player.UserIDString}", playerInfo);
-
-            if (playerInfoCache.ContainsKey(player.UserIDString))
-            {
-                playerInfoCache.Remove(player.UserIDString);
-            }
+            dataFile.WriteObject($"{player.UserIDString}", playerInfo);
+            playerInfoCache[player.UserIDString] = playerInfo;
         }
 
         private PlayerInfoItems LoadPlayerInfoItems(BasePlayer player)
         {
-            if (dataFileItems == null)
-                return null;
+            if (dataFileItems == null || player == null) return null;
 
-            if (playerInfoItemsCache.ContainsKey(player.UserIDString))
-            {
-                return playerInfoItemsCache[player.UserIDString];
-            }
-            else
-            {
-                PlayerInfoItems userItems = dataFileItems.ReadObject<PlayerInfoItems>($"{player.UserIDString}");
+            if (playerInfoItemsCache.TryGetValue(player.UserIDString, out var cached))
+                return cached;
 
-                playerInfoItemsCache[player.UserIDString] = userItems;
-
-                return userItems;
-            }
+            var userItems = dataFileItems.ReadObject<PlayerInfoItems>(player.UserIDString) ?? new PlayerInfoItems();
+            playerInfoItemsCache[player.UserIDString] = userItems;
+            return userItems;
         }
 
         private void SavePlayerInfoItems(BasePlayer player, PlayerInfoItems playerInfoItems)
         {
-            if (dataFileItems == null)
-                return;
+            if (dataFileItems == null) return;
 
-            dataFileItems.WriteObject<PlayerInfoItems>($"{player.UserIDString}", playerInfoItems);
-
-            if (playerInfoItemsCache.ContainsKey(player.UserIDString))
-            {
-                playerInfoItemsCache.Remove(player.UserIDString);
-            }
+            dataFileItems.WriteObject($"{player.UserIDString}", playerInfoItems);
+            playerInfoItemsCache[player.UserIDString] = playerInfoItems;
         }
 
         ////////////////////////////////////////////////////////////
@@ -386,9 +362,13 @@ namespace Oxide.Plugins
         {
             foreach (var player in BasePlayer.activePlayerList)
             {
-                PlayerInfo user = LoadPlayerInfo(player);
-                if (user == null)
-                    continue;
+                if (player == null || !player.IsConnected) continue;
+
+                bool relevant = player.IsFlying || player.IsGod() || player.IsDeveloper;
+                if (!relevant) continue;
+
+                var user = LoadPlayerInfo(player);
+                if (user == null) continue;
 
                 if (!player.IsFlying && user.NoClip)
                 {
@@ -403,9 +383,7 @@ namespace Oxide.Plugins
                 }
 
                 if (player.IsDeveloper && !player.IsFlying && !player.IsGod())
-                {
                     player.SetPlayerFlag(BasePlayer.PlayerFlags.IsDeveloper, false);
-                }
             }
         }
 
@@ -440,28 +418,35 @@ namespace Oxide.Plugins
         private void OnPlayerTick(BasePlayer player)
         {
             if (player == null || !player.IsConnected) return;
-            if (player.IsNpc || (player is NPCPlayer)) return;
+            if (player.IsNpc || player is NPCPlayer) return;
+
+            if (!player.IsFlying) return;
+
+            if (HasPermission(player, permNoClip)) return;
+
+            if (pendingForceNoClip.Contains(player.userID))
+                return;
 
             var user = LoadPlayerInfo(player);
             if (user == null) return;
 
-            if (!HasPermission(player, permNoClip) && !user.NoClip && player.IsFlying)
+            if (user.NoClip) return;
+
+            pendingForceNoClip.Add(player.userID);
+
+            timer.Once(0.05f, () =>
             {
-                if (pendingForceNoClip.Contains(player.userID))
-                    return;
-
-                pendingForceNoClip.Add(player.userID);
-
-                timer.Once(0.05f, () =>
+                if (player == null || !player.IsConnected)
                 {
-                    if (player == null || !player.IsConnected) return;
-
                     pendingForceNoClip.Remove(player.userID);
+                    return;
+                }
 
-                    if (!HasPermission(player, permNoClip) && player.IsFlying)
-                        player.SendConsoleCommand("noclip");
-                });
-            }
+                pendingForceNoClip.Remove(player.userID);
+
+                if (!HasPermission(player, permNoClip) && player.IsFlying)
+                    player.SendConsoleCommand("noclip");
+            });
         }
 
         private void OnServerInitialized()
@@ -472,15 +457,10 @@ namespace Oxide.Plugins
                 {
                     string folderPath = $"{Interface.Oxide.DataDirectory}/AdminUtilities/Settings";
 
-                    if (!Directory.Exists(folderPath))
+                    if (Directory.Exists(folderPath))
                     {
-                        return;
-                    }
-
-                    string[] Files = Directory.GetFiles(folderPath);
-                    foreach (string file in Files)
-                    {
-                        File.Delete(file);
+                        foreach (string file in Directory.GetFiles(folderPath))
+                            File.Delete(file);
                     }
                 }
 
@@ -488,15 +468,10 @@ namespace Oxide.Plugins
                 {
                     string folderItemsPath = $"{Interface.Oxide.DataDirectory}/AdminUtilities/Items";
 
-                    if (!Directory.Exists(folderItemsPath))
+                    if (Directory.Exists(folderItemsPath))
                     {
-                        return;
-                    }
-
-                    string[] ItemsFiles = Directory.GetFiles(folderItemsPath);
-                    foreach (string file in ItemsFiles)
-                    {
-                        File.Delete(file);
+                        foreach (string file in Directory.GetFiles(folderItemsPath))
+                            File.Delete(file);
                     }
                 }
 
@@ -525,13 +500,15 @@ namespace Oxide.Plugins
 
         private void OnPlayerDisconnected(BasePlayer player, string reason)
         {
-
             pendingForceNoClip.Remove(player.userID);
 
-            PlayerInfo user = LoadPlayerInfo(player);
-
+            var user = LoadPlayerInfo(player);
             if (user == null)
+            {
+                playerInfoCache.Remove(player.UserIDString);
+                playerInfoItemsCache.Remove(player.UserIDString);
                 return;
+            }
 
             if (!HasPermission(player, permNoClip) && user.NoClip)
             {
@@ -557,18 +534,17 @@ namespace Oxide.Plugins
                 SavePlayerInfo(player, user);
             }
 
-            if (player.IsDead())
-                return;
-
-            if (HasPermission(player, permTerrain))
+            if (!player.IsDead())
             {
-                DisconnectTeleport(player);
+                if (HasPermission(player, permTerrain))
+                    DisconnectTeleport(player);
+
+                if (HasPermission(player, permInventory) && user.SaveInventory)
+                    SaveInventory(player);
             }
 
-            if (HasPermission(player, permInventory) && user.SaveInventory)
-            {
-                SaveInventory(player);
-            }
+            playerInfoCache.Remove(player.UserIDString);
+            playerInfoItemsCache.Remove(player.UserIDString);
         }
 
         private void OnPlayerConnected(BasePlayer player)
@@ -587,7 +563,9 @@ namespace Oxide.Plugins
             {
                 player.SetPlayerFlag(BasePlayer.PlayerFlags.IsDeveloper, true);
 
-                timer.Once(0.2f, () => {
+                timer.Once(0.2f, () =>
+                {
+                    if (player == null || !player.IsConnected) return;
                     player.SendConsoleCommand("noclip");
                 });
             }
@@ -597,6 +575,7 @@ namespace Oxide.Plugins
                 player.SetPlayerFlag(BasePlayer.PlayerFlags.IsDeveloper, true);
 
                 timer.Once(0.2f, () => {
+                    if (player == null || !player.IsConnected) return;
                     player.SendConsoleCommand("setinfo \"global.god\" \"True\"");
                 });
             }
@@ -649,15 +628,10 @@ namespace Oxide.Plugins
                     }
                 }
 
-                if (userItems.Items.Any(item => item.amount > 0))
+                foreach (var aui in userItems.Items)
                 {
-                    foreach (var aui in userItems.Items.ToList())
-                    {
-                        if (aui.amount > 0)
-                        {
-                            AdminUtilitiesItem.Restore(player, aui);
-                        }
-                    }
+                    if (aui.amount > 0)
+                        AdminUtilitiesItem.Restore(player, aui);
                 }
 
                 userItems.Items.Clear();
@@ -806,6 +780,7 @@ namespace Oxide.Plugins
             if (!player.IsFlying)
             {
                 timer.Once(0.2f, () => {
+                    if (player == null || !player.IsConnected) return;
                     player.SendConsoleCommand("noclip");
                     Player.Message(player, msg("FlyEnabled", player.UserIDString));
                 });
@@ -831,6 +806,7 @@ namespace Oxide.Plugins
             if (!player.IsGod())
             {
                 timer.Once(0.2f, () => {
+                    if (player == null || !player.IsConnected) return;
                     player.SendConsoleCommand("setinfo \"global.god\" \"True\"");
                     Player.Message(player, msg("GodEnabled", player.UserIDString));
                 });
@@ -953,13 +929,11 @@ namespace Oxide.Plugins
 
         private void AddItemsFromContainer(ItemContainer container, string containerName, List<AdminUtilitiesItem> items)
         {
-            foreach (Item item in container.itemList)
+            foreach (var item in container.itemList.ToList())
             {
                 items.Add(new AdminUtilitiesItem(containerName, item));
                 item.Remove();
             }
-
-            container.itemList.Clear();
         }
 
         private bool HasPermission(BasePlayer player, string permName)
