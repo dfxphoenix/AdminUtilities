@@ -31,6 +31,12 @@ It includes a built-in moderation system with support for kick, ban, banip, unba
 * `/unban <name/steamid/ip>` - Remove a ban from a player or IP (require adminutilities.unban).
 * `/banlist [page]` - Show the list of active bans with pagination (require adminutilities.banlist).
 
+## Server Commands
+* `kick <name> [reason]` - Kick a player from the server.
+* `ban <name/steamid/ip> [duration] [reason]` - Ban a player or IP (permanent or temporary).
+* `banip <name/steamid/ip> [duration] [reason]` - Ban a player and their IP or ban an IP with all known accounts.
+* `unban <name/steamid/ip>` - Remove a ban from a player or IP.
+
 ## Configuration
 
 ```json
