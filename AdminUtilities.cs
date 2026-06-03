@@ -15,7 +15,7 @@ using Network;
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Utilities", "dFxPhoeniX", "2.6.2")]
+    [Info("Admin Utilities", "dFxPhoeniX", "2.6.3")]
     [Description("Toggle NoClip, teleport Under Terrain and more")]
     public class AdminUtilities : RustPlugin
     {
@@ -3227,7 +3227,7 @@ namespace Oxide.Plugins
                 player.metabolism.wetness.max = 0;
                 player.metabolism.calories.min = player.metabolism.calories.value;
                 player.metabolism.isDirty = true;
-                player.metabolism.SendChangesToClient();
+                player.metabolism.SendChanges();
                 user.UnderTerrain = true;
                 SavePlayerInfo(player, user);
             }
@@ -3254,7 +3254,8 @@ namespace Oxide.Plugins
                 player.metabolism.oxygen.min = 0;
                 player.metabolism.calories.min = 0;
                 player.metabolism.wetness.max = 1;
-                player.metabolism.SendChangesToClient();
+                player.metabolism.isDirty = true;
+                player.metabolism.SendChanges();
                 user.UnderTerrain = false;
                 SavePlayerInfo(player, user);
             }
