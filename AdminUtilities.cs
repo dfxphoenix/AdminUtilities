@@ -15,7 +15,7 @@ using Network;
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Utilities", "dFxPhoeniX", "2.6.3")]
+    [Info("Admin Utilities", "dFxPhoeniX", "2.6.4")]
     [Description("Toggle NoClip, teleport Under Terrain and more")]
     public class AdminUtilities : RustPlugin
     {
@@ -513,7 +513,7 @@ namespace Oxide.Plugins
 
             string cmd = arg.cmd.FullName.ToLowerInvariant();
 
-            string[] args = arg.Args ?? Array.Empty<string>();
+            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
             return TryHandleServerConsoleCommand(arg, cmd, args) ? (object)true : null;
         }
 
@@ -1356,7 +1356,7 @@ namespace Oxide.Plugins
         private void cmdSpawnConsole(ConsoleSystem.Arg arg)
         {
             BasePlayer player = arg.Player();
-            string[] args = arg.Args ?? Array.Empty<string>();
+            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
 
             if (player != null)
                 args = NormalizePlayerConsoleArgs(args);
@@ -1443,7 +1443,7 @@ namespace Oxide.Plugins
         private void cmdSpawnToConsole(ConsoleSystem.Arg arg)
         {
             BasePlayer player = arg.Player();
-            string[] args = arg.Args ?? Array.Empty<string>();
+            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
 
             if (player != null)
                 args = NormalizePlayerConsoleArgs(args);
@@ -1546,7 +1546,7 @@ namespace Oxide.Plugins
         private void cmdSpawnAllConsole(ConsoleSystem.Arg arg)
         {
             BasePlayer player = arg.Player();
-            string[] args = arg.Args ?? Array.Empty<string>();
+            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
 
             if (player != null)
                 args = NormalizePlayerConsoleArgs(args);
@@ -1829,7 +1829,7 @@ namespace Oxide.Plugins
         private void cmdGiveConsole(ConsoleSystem.Arg arg)
         {
             BasePlayer player = arg.Player();
-            string[] args = arg.Args ?? Array.Empty<string>();
+            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
 
             if (player == null)
             {
@@ -2108,7 +2108,7 @@ namespace Oxide.Plugins
         private void cmdGiveToConsole(ConsoleSystem.Arg arg)
         {
             BasePlayer player = arg.Player();
-            string[] args = arg.Args ?? Array.Empty<string>();
+            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
 
             if (player == null)
             {
@@ -2260,7 +2260,7 @@ namespace Oxide.Plugins
         private void cmdGiveAllConsole(ConsoleSystem.Arg arg)
         {
             BasePlayer player = arg.Player();
-            string[] args = arg.Args ?? Array.Empty<string>();
+            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
 
             if (player == null)
             {
@@ -2361,7 +2361,7 @@ namespace Oxide.Plugins
                 return;
             }
 
-            string[] args = arg.Args ?? Array.Empty<string>();
+            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
             if (args.Length < 1)
             {
                 ReplyPlayerConsoleLocalized(player, "UsageGiveSelf", "inventory.give");
@@ -2410,7 +2410,7 @@ namespace Oxide.Plugins
                 return;
             }
 
-            string[] args = arg.Args ?? Array.Empty<string>();
+            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
             if (args.Length < 1)
             {
                 ReplyPlayerConsoleLocalized(player, "UsageGiveSelf", "inventory.giveid");
@@ -2447,7 +2447,7 @@ namespace Oxide.Plugins
         private void cmdInventoryGiveTo(ConsoleSystem.Arg arg)
         {
             BasePlayer player = arg.Player();
-            string[] args = arg.Args ?? Array.Empty<string>();
+            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
 
             if (player == null)
             {
@@ -2574,7 +2574,7 @@ namespace Oxide.Plugins
         private void cmdInventoryGiveAll(ConsoleSystem.Arg arg)
         {
             BasePlayer player = arg.Player();
-            string[] args = arg.Args ?? Array.Empty<string>();
+            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
 
             if (player == null)
             {
@@ -2678,7 +2678,7 @@ namespace Oxide.Plugins
             if (user == null)
                 return;
 
-            string[] args = arg.Args ?? Array.Empty<string>();
+            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
             if (args.Length >= 1)
             {
                 switch (args[0].ToLower())
@@ -2726,7 +2726,7 @@ namespace Oxide.Plugins
         private void cmdEntitySpawnConsole(ConsoleSystem.Arg arg)
         {
             BasePlayer player = arg.Player();
-            string[] args = arg.Args ?? Array.Empty<string>();
+            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
 
             if (player != null)
                 args = NormalizePlayerConsoleArgs(args);
@@ -2808,7 +2808,7 @@ namespace Oxide.Plugins
                 return;
             }
 
-            string[] args = arg.Args ?? Array.Empty<string>();
+            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
             if (args.Length < 1)
             {
                 ReplyPlayerConsoleLocalized(player, "KickUsage", "kick");
@@ -2853,7 +2853,7 @@ namespace Oxide.Plugins
                 return;
             }
 
-            string[] args = arg.Args ?? Array.Empty<string>();
+            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
             if (!TryParseModerationArgs(args, out var targetInput, out var duration, out var reason))
             {
                 ReplyPlayerConsoleLocalized(player, includeIp ? "BanIpUsage" : "BanUsage", includeIp ? "banip" : "ban");
@@ -2972,7 +2972,7 @@ namespace Oxide.Plugins
                 return;
             }
 
-            string[] args = arg.Args ?? Array.Empty<string>();
+            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
             if (args.Length != 1)
             {
                 ReplyPlayerConsoleLocalized(player, "UnbanUsage", "unban");
@@ -3066,7 +3066,7 @@ namespace Oxide.Plugins
             string mode = "all";
             int page = 1;
 
-            string[] args = arg.Args ?? Array.Empty<string>();
+            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
             if (args.Length >= 1)
                 mode = args[0].ToLower();
 
