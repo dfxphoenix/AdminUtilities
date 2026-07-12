@@ -15,7 +15,7 @@ using Network;
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Utilities", "dFxPhoeniX", "2.6.4")]
+    [Info("Admin Utilities", "dFxPhoeniX", "2.6.5")]
     [Description("Toggle NoClip, teleport Under Terrain and more")]
     public class AdminUtilities : RustPlugin
     {
@@ -2726,20 +2726,19 @@ namespace Oxide.Plugins
         private void cmdEntitySpawnConsole(ConsoleSystem.Arg arg)
         {
             BasePlayer player = arg.Player();
-            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
-
-            if (player != null)
-                args = NormalizePlayerConsoleArgs(args);
+            string entityArg = arg.GetString(0, string.Empty);
 
             if (player == null)
             {
-                if (args.Length < 1)
+                if (string.IsNullOrWhiteSpace(entityArg))
                 {
                     ReplyConsoleLocalized(arg, "UsageSpawn", "entity.spawn");
                     return;
                 }
 
-                ReplyConsoleLocalized(arg, "PlayersOnly", "entity.spawn");
+                string result = ConVar.Entity.svspawn(entityArg, arg.GetVector3(1, Vector3.zero), arg.GetVector3(2, Vector3.zero));
+
+                arg.ReplyWithObject(result);
                 return;
             }
 
@@ -2749,18 +2748,27 @@ namespace Oxide.Plugins
                 return;
             }
 
-            if (args.Length < 1)
+            if (string.IsNullOrWhiteSpace(entityArg))
             {
                 ReplyPlayerConsoleLocalized(player, "UsageSpawn", "entity.spawn");
                 return;
             }
 
-            string entityArg = args[0];
-            string resolvedSelf = ResolveEntity(entityArg, player, (k, a) => ReplyPlayerConsoleLocalized(player, k, a));
+            string resolvedSelf = ResolveEntity(entityArg, player, (key, messageArgs) => ReplyPlayerConsoleLocalized(player, key, messageArgs));
+
             if (string.IsNullOrEmpty(resolvedSelf))
                 return;
 
-            bool spawnedSelf = SpawnForPlayer(player, resolvedSelf);
+            Vector3 defaultPosition = GetSpawnPosition(player);
+
+            Vector3 defaultRotation = new Vector3(0f, player.eyes.rotation.eulerAngles.y, 0f);
+
+            Vector3 position = arg.GetVector3(1, defaultPosition);
+
+            Vector3 rotation = arg.GetVector3(2, defaultRotation);
+
+            bool spawnedSelf = SpawnForPlayer(player, resolvedSelf, position, Quaternion.Euler(rotation));
+
             ReplyPlayerConsoleLocalized(player, spawnedSelf ? "SpawnSuccess" : "SpawnFail", entityArg);
 
             if (spawnedSelf)
@@ -4979,13 +4987,14 @@ namespace Oxide.Plugins
             return true;
         }
 
-        private bool SpawnForPlayer(BasePlayer target, string resolved)
+        private bool SpawnForPlayer(BasePlayer target, string resolved, Vector3? customPosition = null, Quaternion? customRotation = null)
         {
             if (target == null || !target.IsConnected)
                 return false;
 
-            Vector3 position = GetSpawnPosition(target);
-            Quaternion rotation = Quaternion.Euler(0f, target.eyes.rotation.eulerAngles.y, 0f);
+            Vector3 position = customPosition ?? GetSpawnPosition(target);
+
+            Quaternion rotation = customRotation ?? Quaternion.Euler(0f, target.eyes.rotation.eulerAngles.y, 0f);
 
             if (IsSpawnToken(resolved))
             {

@@ -75,7 +75,7 @@ It also includes give/spawn utilities, blacklist support for items and spawn ali
 * `inventory.giveid <itemid> [amount]` - Native-compatible give-by-itemid alias (require `adminutilities.give`).
 * `inventory.giveto <name/steamid> <item> [amount]` - Native-compatible giveto alias (require `adminutilities.giveto`).
 * `inventory.giveall <item> [amount]` - Native-compatible giveall alias (require `adminutilities.giveall`).
-* `entity.spawn <entity>` - Native-compatible player console alias for spawning an entity for yourself (require `adminutilities.spawn`).
+* `entity.spawn <entity> [position] [rotation]` - Native-compatible player console alias for spawning an entity for yourself (require `adminutilities.spawn`).
 
 ## Server Commands
 * `kick <name> [reason]` - Kick a player from the server.
@@ -90,6 +90,7 @@ It also includes give/spawn utilities, blacklist support for items and spawn ali
 * `giveall <item> [amount]` - Give an item to all connected players.
 * `inventory.giveto <name/steamid> <item> [amount]` - Native-compatible giveto alias.
 * `inventory.giveall <item> [amount]` - Native-compatible giveall alias.
+* `entity.spawn <entity> [position] [rotation]` - Native-compatible player console alias for spawning an entity for yourself.
 
 ## Configuration
 
