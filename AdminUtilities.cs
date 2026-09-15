@@ -15,7 +15,7 @@ using Network;
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Utilities", "dFxPhoeniX", "2.6.5")]
+    [Info("Admin Utilities", "dFxPhoeniX", "2.6.6")]
     [Description("Toggle NoClip, teleport Under Terrain and more")]
     public class AdminUtilities : RustPlugin
     {
@@ -48,6 +48,8 @@ namespace Oxide.Plugins
 
         private ModerationData moderationData = new ModerationData();
         private readonly HashSet<ulong> pendingForceNoClip = new HashSet<ulong>();
+        private readonly HashSet<ulong> pendingNoClipToggle = new HashSet<ulong>();
+        private readonly HashSet<ulong> pendingGodModeChange = new HashSet<ulong>();
 
         private readonly HashSet<string> allPrefabs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, string> prefabLookup = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -65,6 +67,7 @@ namespace Oxide.Plugins
             public bool UnderTerrain { get; set; } = false;
             public bool NoClip { get; set; } = false;
             public bool GodMode { get; set; } = false;
+            public bool DeveloperFlagOwned { get; set; } = false;
         }
 
         private Dictionary<string, PlayerInfo> playerInfoCache = new Dictionary<string, PlayerInfo>();
@@ -449,26 +452,30 @@ namespace Oxide.Plugins
             {
                 if (player == null || !player.IsConnected) continue;
 
-                bool relevant = player.IsFlying || player.IsGod() || player.IsDeveloper;
-                if (!relevant) continue;
-
-                var user = LoadPlayerInfo(player);
+                PlayerInfo user = LoadPlayerInfo(player);
                 if (user == null) continue;
 
-                if (!player.IsFlying && user.NoClip)
+                bool changed = false;
+
+                if (!pendingNoClipToggle.Contains(player.userID) && user.NoClip != player.IsFlying)
                 {
-                    user.NoClip = false;
-                    SavePlayerInfo(player, user);
+                    if (!player.IsFlying || HasPermission(player, permNoClip))
+                    {
+                        user.NoClip = player.IsFlying;
+                        changed = true;
+                    }
                 }
 
-                if (!player.IsGod() && user.GodMode)
+                if (!pendingGodModeChange.Contains(player.userID) && user.GodMode && !player.IsGod())
                 {
                     user.GodMode = false;
-                    SavePlayerInfo(player, user);
+                    changed = true;
                 }
 
-                if (player.IsDeveloper && !player.IsFlying && !player.IsGod())
-                    player.SetPlayerFlag(BasePlayer.PlayerFlags.IsDeveloper, false);
+                if (changed)
+                    SavePlayerInfo(player, user);
+
+                ReleaseDeveloperFlag(player, user);
             }
         }
 
@@ -487,11 +494,11 @@ namespace Oxide.Plugins
 
             string lowerCommand = command.ToLowerInvariant();
 
-            if (lowerCommand.Contains("setinfo \"global.god\" \"true\""))
-            {
-                if (!HasPermission(player, permGodMode) && !user.GodMode && !player.IsGod())
-                    return false;
-            }
+            bool enableGod = lowerCommand.Contains("setinfo \"global.god\" \"true\"") || lowerCommand.Contains("setinfo \"global.god\" \"1\"");
+            bool disableGod = lowerCommand.Contains("setinfo \"global.god\" \"false\"") || lowerCommand.Contains("setinfo \"global.god\" \"0\"");
+
+            if (enableGod && !HasPermission(player, permGodMode) && !user.GodMode && !player.IsGod())
+                return false;
 
             string playerConsoleCommand = ExtractPlayerConsoleCommandName(lowerCommand);
             if (IsDisabledPlayerConsoleCommand(playerConsoleCommand) &&
@@ -502,6 +509,40 @@ namespace Oxide.Plugins
             if (IsDisabledChatCommand(chatCommand) &&
                 !HasPermission(player, permBypassDisabledChatCommands))
                 return false;
+
+            if (enableGod || disableGod)
+            {
+                bool enabled = enableGod;
+                user.GodMode = enabled;
+                SavePlayerInfo(player, user);
+
+                if (enabled)
+                    EnsureDeveloperFlag(player, user);
+
+                ulong userId = player.userID;
+                if (!pendingGodModeChange.Contains(userId))
+                {
+                    pendingGodModeChange.Add(userId);
+
+                    timer.Once(0.2f, () =>
+                    {
+                        pendingGodModeChange.Remove(userId);
+
+                        if (player == null || !player.IsConnected) return;
+
+                        PlayerInfo currentUser = LoadPlayerInfo(player);
+                        if (currentUser == null) return;
+
+                        if (currentUser.GodMode != player.IsGod())
+                        {
+                            currentUser.GodMode = player.IsGod();
+                            SavePlayerInfo(player, currentUser);
+                        }
+
+                        ReleaseDeveloperFlag(player, currentUser);
+                    });
+                }
+            }
 
             return null;
         }
@@ -545,32 +586,35 @@ namespace Oxide.Plugins
             if (player == null || !player.IsConnected) return;
             if (player.IsNpc || player is NPCPlayer) return;
 
-            if (!player.IsFlying) return;
-
-            if (HasPermission(player, permNoClip)) return;
-
-            if (pendingForceNoClip.Contains(player.userID))
-                return;
-
-            var user = LoadPlayerInfo(player);
+            PlayerInfo user = LoadPlayerInfo(player);
             if (user == null) return;
 
-            if (user.NoClip) return;
+            bool hasNoClipPermission = HasPermission(player, permNoClip);
 
-            pendingForceNoClip.Add(player.userID);
+            if (!pendingNoClipToggle.Contains(player.userID) && user.NoClip != player.IsFlying)
+            {
+                if (!player.IsFlying || hasNoClipPermission)
+                {
+                    user.NoClip = player.IsFlying;
+                    SavePlayerInfo(player, user);
+                    ReleaseDeveloperFlag(player, user);
+                }
+            }
+
+            if (!player.IsFlying || hasNoClipPermission) return;
+            if (pendingForceNoClip.Contains(player.userID) || pendingNoClipToggle.Contains(player.userID)) return;
+
+            ulong userId = player.userID;
+            pendingForceNoClip.Add(userId);
 
             timer.Once(0.05f, () =>
             {
-                if (player == null || !player.IsConnected)
-                {
-                    pendingForceNoClip.Remove(player.userID);
-                    return;
-                }
+                pendingForceNoClip.Remove(userId);
 
-                pendingForceNoClip.Remove(player.userID);
+                if (player == null || !player.IsConnected) return;
+                if (HasPermission(player, permNoClip) || !player.IsFlying) return;
 
-                if (!HasPermission(player, permNoClip) && player.IsFlying)
-                    player.SendConsoleCommand("noclip");
+                SetNoClipState(player, user, false);
             });
         }
 
@@ -729,6 +773,8 @@ namespace Oxide.Plugins
         private void OnPlayerDisconnected(BasePlayer player, string reason)
         {
             pendingForceNoClip.Remove(player.userID);
+            pendingNoClipToggle.Remove(player.userID);
+            pendingGodModeChange.Remove(player.userID);
 
             var user = LoadPlayerInfo(player);
             if (user == null)
@@ -736,6 +782,12 @@ namespace Oxide.Plugins
                 playerInfoCache.Remove(player.UserIDString);
                 playerInfoItemsCache.Remove(player.UserIDString);
                 return;
+            }
+
+            if (user.DeveloperFlagOwned)
+            {
+                user.DeveloperFlagOwned = false;
+                SavePlayerInfo(player, user);
             }
 
             if (!HasPermission(player, permNoClip) && user.NoClip)
@@ -788,27 +840,11 @@ namespace Oxide.Plugins
                 NoUnderTerrain(player);
             }
 
-            if (persistentNoClip && HasPermission(player, permNoClip) && user.NoClip)
-            {
-                player.SetPlayerFlag(BasePlayer.PlayerFlags.IsDeveloper, true);
-
-                timer.Once(0.2f, () =>
-                {
-                    if (player == null || !player.IsConnected) return;
-                    player.SendConsoleCommand("noclip");
-                });
-            }
-
             if (persistentGodMode && HasPermission(player, permGodMode) && user.GodMode)
-            {
-                player.SetPlayerFlag(BasePlayer.PlayerFlags.IsDeveloper, true);
+                ApplyGodModeState(player, user, true);
 
-                timer.Once(0.2f, () =>
-                {
-                    if (player == null || !player.IsConnected) return;
-                    player.SendConsoleCommand("setinfo \"global.god\" \"true\"");
-                });
-            }
+            if (persistentNoClip && HasPermission(player, permNoClip) && user.NoClip)
+                SetNoClipState(player, user, true);
 
             timer.Once(0.5f, () =>
             {
@@ -3141,33 +3177,74 @@ namespace Oxide.Plugins
             if (user == null)
                 return;
 
-            player.SetPlayerFlag(BasePlayer.PlayerFlags.IsDeveloper, true);
-            if (!player.IsFlying)
+            SetNoClipState(player, user, !player.IsFlying, true, replyToConsole);
+        }
+
+        private void SetNoClipState(BasePlayer player, PlayerInfo user, bool enabled, bool sendReply = false, bool replyToConsole = false)
+        {
+            if (player == null || user == null || !player.IsConnected) return;
+            if (pendingNoClipToggle.Contains(player.userID)) return;
+
+            if (player.IsFlying == enabled)
             {
-                timer.Once(0.2f, () =>
+                if (user.NoClip != enabled)
                 {
-                    if (player == null || !player.IsConnected) return;
+                    user.NoClip = enabled;
+                    SavePlayerInfo(player, user);
+                }
 
-                    player.SendConsoleCommand("noclip");
-
-                    if (replyToConsole)
-                        ReplyPlayerConsoleLocalized(player, "FlyEnabled");
-                    else
-                        ReplyPlayerLocalized(player, "FlyEnabled");
-                });
+                ReleaseDeveloperFlag(player, user);
+                return;
             }
-            else
+
+            if (!user.GodMode)
+                SetGodConnectionState(player, false);
+
+            bool addedDeveloperFlag = EnsureDeveloperFlag(player, user);
+
+            ulong userId = player.userID;
+            float toggleDelay = addedDeveloperFlag ? 0.2f : 0f;
+
+            user.NoClip = enabled;
+            SavePlayerInfo(player, user);
+            pendingNoClipToggle.Add(userId);
+
+            timer.Once(toggleDelay, () =>
             {
+                if (player == null || !player.IsConnected)
+                {
+                    pendingNoClipToggle.Remove(userId);
+                    return;
+                }
+
                 player.SendConsoleCommand("noclip");
 
-                if (replyToConsole)
-                    ReplyPlayerConsoleLocalized(player, "FlyDisabled");
-                else
-                    ReplyPlayerLocalized(player, "FlyDisabled");
-            }
+                if (sendReply)
+                {
+                    if (replyToConsole)
+                        ReplyPlayerConsoleLocalized(player, enabled ? "FlyEnabled" : "FlyDisabled");
+                    else
+                        ReplyPlayerLocalized(player, enabled ? "FlyEnabled" : "FlyDisabled");
+                }
 
-            user.NoClip = !player.IsFlying;
-            SavePlayerInfo(player, user);
+                timer.Once(0.3f, () =>
+                {
+                    pendingNoClipToggle.Remove(userId);
+
+                    if (player == null || !player.IsConnected) return;
+
+                    PlayerInfo currentUser = LoadPlayerInfo(player);
+                    if (currentUser == null) return;
+
+                    if (currentUser.NoClip != player.IsFlying)
+                    {
+                        currentUser.NoClip = player.IsFlying;
+                        SavePlayerInfo(player, currentUser);
+                    }
+
+                    ReleaseDeveloperFlag(player, currentUser);
+                });
+            });
         }
 
         private void ToggleGodMode(BasePlayer player, bool replyToConsole = false)
@@ -3177,33 +3254,80 @@ namespace Oxide.Plugins
             if (user == null)
                 return;
 
-            player.SetPlayerFlag(BasePlayer.PlayerFlags.IsDeveloper, true);
-            if (!player.IsGod())
-            {
-                timer.Once(0.2f, () =>
-                {
-                    if (player == null || !player.IsConnected) return;
+            bool enabled = !user.GodMode;
+            ApplyGodModeState(player, user, enabled);
 
-                    player.SendConsoleCommand("setinfo \"global.god\" \"true\"");
-
-                    if (replyToConsole)
-                        ReplyPlayerConsoleLocalized(player, "GodEnabled");
-                    else
-                        ReplyPlayerLocalized(player, "GodEnabled");
-                });
-            }
+            if (replyToConsole)
+                ReplyPlayerConsoleLocalized(player, enabled ? "GodEnabled" : "GodDisabled");
             else
-            {
-                player.SendConsoleCommand("setinfo \"global.god\" \"false\"");
+                ReplyPlayerLocalized(player, enabled ? "GodEnabled" : "GodDisabled");
+        }
 
-                if (replyToConsole)
-                    ReplyPlayerConsoleLocalized(player, "GodDisabled");
-                else
-                    ReplyPlayerLocalized(player, "GodDisabled");
-            }
+        private void ApplyGodModeState(BasePlayer player, PlayerInfo user, bool enabled)
+        {
+            if (player == null || user == null || !player.IsConnected) return;
 
-            user.GodMode = !player.IsGod();
+            if (enabled)
+                EnsureDeveloperFlag(player, user);
+
+            ulong userId = player.userID;
+            pendingGodModeChange.Add(userId);
+
+            user.GodMode = enabled;
             SavePlayerInfo(player, user);
+            SetGodConnectionState(player, enabled);
+
+            timer.Once(0.3f, () =>
+            {
+                pendingGodModeChange.Remove(userId);
+
+                if (player == null || !player.IsConnected) return;
+
+                PlayerInfo currentUser = LoadPlayerInfo(player);
+                if (currentUser == null) return;
+
+                if (currentUser.GodMode != player.IsGod())
+                {
+                    currentUser.GodMode = player.IsGod();
+                    SavePlayerInfo(player, currentUser);
+                }
+
+                ReleaseDeveloperFlag(player, currentUser);
+            });
+        }
+
+        private void SetGodConnectionState(BasePlayer player, bool enabled)
+        {
+            if (player?.net?.connection == null) return;
+
+            string value = enabled ? "1" : "0";
+            string commandValue = enabled ? "true" : "false";
+            player.net.connection.info.Set("global.god", value);
+            player.SendConsoleCommand($"setinfo \"global.god\" \"{commandValue}\"");
+        }
+
+        private bool EnsureDeveloperFlag(BasePlayer player, PlayerInfo user)
+        {
+            if (player == null || user == null || player.IsAdmin) return false;
+            if (player.IsDeveloper) return false;
+
+            player.SetPlayerFlag(BasePlayer.PlayerFlags.IsDeveloper, true);
+            user.DeveloperFlagOwned = true;
+            SavePlayerInfo(player, user);
+            return true;
+        }
+
+        private void ReleaseDeveloperFlag(BasePlayer player, PlayerInfo user)
+        {
+            if (player == null || user == null || !user.DeveloperFlagOwned) return;
+            if (user.NoClip || user.GodMode) return;
+            if (pendingNoClipToggle.Contains(player.userID) || pendingGodModeChange.Contains(player.userID)) return;
+
+            user.DeveloperFlagOwned = false;
+            SavePlayerInfo(player, user);
+
+            if (player.IsDeveloper)
+                player.SetPlayerFlag(BasePlayer.PlayerFlags.IsDeveloper, false);
         }
 
         private void DisconnectTeleport(BasePlayer player)
@@ -5284,7 +5408,6 @@ namespace Oxide.Plugins
                 ["GodEnabled"] = "You switched GodMode on!",
                 ["NoPermission"] = "You do not have permission to use this command.",
                 ["PlayerNotFound"] = "Player not found.",
-                ["IpUnavailable"] = "No IP could be resolved for that target.",
                 ["InvalidDuration"] = "Invalid duration. Use formats like 30m, 2h, 7d, 1w.",
                 ["KickUsage"] = "Usage: {0} <name/steamid> [reason]",
                 ["BanUsage"] = "Usage: {0} <name/steamid/ip> [duration] [reason]",
@@ -5380,7 +5503,6 @@ namespace Oxide.Plugins
                 ["GodEnabled"] = "Ai activat GodMode-ul!",
                 ["NoPermission"] = "Nu ai permisiunea de a folosi această comandă.",
                 ["PlayerNotFound"] = "Jucătorul nu a fost găsit.",
-                ["IpUnavailable"] = "Nu s-a putut rezolva niciun IP pentru acea țintă.",
                 ["InvalidDuration"] = "Durată invalidă. Folosește formate precum 30m, 2h, 7d, 1w.",
                 ["KickUsage"] = "Utilizare: {0} <nume/steamid> [motiv]",
                 ["BanUsage"] = "Utilizare: {0} <nume/steamid/ip> [durată] [motiv]",
