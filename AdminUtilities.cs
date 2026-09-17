@@ -15,7 +15,7 @@ using Network;
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Utilities", "dFxPhoeniX", "2.6.6")]
+    [Info("Admin Utilities", "dFxPhoeniX", "2.6.8")]
     [Description("Toggle NoClip, teleport Under Terrain and more")]
     public class AdminUtilities : RustPlugin
     {
@@ -45,11 +45,15 @@ namespace Oxide.Plugins
 
         private DataFileSystem dataFile;
         private DataFileSystem dataFileItems;
+        private Dictionary<string, PlayerInfo> playerInfoCache = new Dictionary<string, PlayerInfo>();
+        private Dictionary<string, PlayerInfoItems> playerInfoItemsCache = new Dictionary<string, PlayerInfoItems>();
 
         private ModerationData moderationData = new ModerationData();
         private readonly HashSet<ulong> pendingForceNoClip = new HashSet<ulong>();
         private readonly HashSet<ulong> pendingNoClipToggle = new HashSet<ulong>();
         private readonly HashSet<ulong> pendingGodModeChange = new HashSet<ulong>();
+        private readonly Dictionary<ulong, NoClipPermissionState> noClipPermissionCache = new Dictionary<ulong, NoClipPermissionState>();
+        private const float NoClipPermissionCacheDuration = 1f;
 
         private readonly HashSet<string> allPrefabs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, string> prefabLookup = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -59,6 +63,12 @@ namespace Oxide.Plugins
         ////////////////////////////////////////////////////////////
         // Files
         ////////////////////////////////////////////////////////////
+
+        private struct NoClipPermissionState
+        {
+            public bool Allowed;
+            public float ExpiresAt;
+        }
 
         private class PlayerInfo
         {
@@ -70,15 +80,11 @@ namespace Oxide.Plugins
             public bool DeveloperFlagOwned { get; set; } = false;
         }
 
-        private Dictionary<string, PlayerInfo> playerInfoCache = new Dictionary<string, PlayerInfo>();
-
         private class PlayerInfoItems
         {
             public List<AdminUtilitiesItem> Items { get; set; } = new List<AdminUtilitiesItem>();
             public bool SnapshotOnly { get; set; } = false;
         }
-
-        private Dictionary<string, PlayerInfoItems> playerInfoItemsCache = new Dictionary<string, PlayerInfoItems>();
 
         private class AdminUtilitiesItem
         {
@@ -212,8 +218,7 @@ namespace Oxide.Plugins
 
                 if (aui.frequency > 0 && item.info.GetComponentInChildren<ItemModRFListener>() != null)
                 {
-                    if (item.instanceData != null && item.instanceData.subEntity.IsValid &&
-                        BaseNetworkable.serverEntities.Find(item.instanceData.subEntity) is PagerEntity pagerEntity)
+                    if (item.instanceData != null && item.instanceData.subEntity.IsValid && BaseNetworkable.serverEntities.Find(item.instanceData.subEntity) is PagerEntity pagerEntity)
                     {
                         pagerEntity.ChangeFrequency(aui.frequency);
                     }
@@ -260,7 +265,7 @@ namespace Oxide.Plugins
                     return;
                 }
 
-                // fallback generic container
+                // Generic container fallback
                 if (item.contents == null)
                 {
                     item.contents = Pool.Get<ItemContainer>();
@@ -414,6 +419,12 @@ namespace Oxide.Plugins
         {
             InitConfig();
 
+            if (globalServerMessageIconId == 0)
+            {
+                Unsubscribe(nameof(OnBroadcastCommand));
+                Unsubscribe(nameof(OnSendCommand));
+            }
+
             dataFile = new DataFileSystem($"{Interface.Oxide.DataDirectory}\\AdminUtilities\\Settings");
             dataFileItems = new DataFileSystem($"{Interface.Oxide.DataDirectory}\\AdminUtilities\\Items");
             LoadModerationData();
@@ -452,16 +463,21 @@ namespace Oxide.Plugins
             {
                 if (player == null || !player.IsConnected) continue;
 
-                PlayerInfo user = LoadPlayerInfo(player);
+                if (!playerInfoCache.TryGetValue(player.UserIDString, out var user))
+                    user = LoadPlayerInfo(player);
+
                 if (user == null) continue;
+
+                bool isFlying = player.IsFlying;
+                if (!isFlying && !user.NoClip && !user.GodMode && !user.DeveloperFlagOwned) continue;
 
                 bool changed = false;
 
-                if (!pendingNoClipToggle.Contains(player.userID) && user.NoClip != player.IsFlying)
+                if (!pendingNoClipToggle.Contains(player.userID) && user.NoClip != isFlying)
                 {
-                    if (!player.IsFlying || HasPermission(player, permNoClip))
+                    if (!isFlying || HasPermission(player, permNoClip))
                     {
-                        user.NoClip = player.IsFlying;
+                        user.NoClip = isFlying;
                         changed = true;
                     }
                 }
@@ -481,68 +497,51 @@ namespace Oxide.Plugins
 
         private object OnClientCommand(Connection connection, string command)
         {
-            if (string.IsNullOrWhiteSpace(command))
-                return null;
+            if (connection == null || string.IsNullOrWhiteSpace(command)) return null;
 
             BasePlayer player = BasePlayer.FindByID(connection.userid);
-            if (player == null)
-                return null;
+            if (player == null) return null;
 
-            PlayerInfo user = LoadPlayerInfo(player);
-            if (user == null)
-                return null;
-
-            string lowerCommand = command.ToLowerInvariant();
-
-            bool enableGod = lowerCommand.Contains("setinfo \"global.god\" \"true\"") || lowerCommand.Contains("setinfo \"global.god\" \"1\"");
-            bool disableGod = lowerCommand.Contains("setinfo \"global.god\" \"false\"") || lowerCommand.Contains("setinfo \"global.god\" \"0\"");
-
-            if (enableGod && !HasPermission(player, permGodMode) && !user.GodMode && !player.IsGod())
-                return false;
-
-            string playerConsoleCommand = ExtractPlayerConsoleCommandName(lowerCommand);
-            if (IsDisabledPlayerConsoleCommand(playerConsoleCommand) &&
-                !HasPermission(player, permBypassDisabledPlayerConsoleCommands))
-                return false;
-
-            string chatCommand = ExtractChatCommandName(command);
-            if (IsDisabledChatCommand(chatCommand) &&
-                !HasPermission(player, permBypassDisabledChatCommands))
-                return false;
+            bool enableGod = command.IndexOf("setinfo \"global.god\" \"true\"", StringComparison.OrdinalIgnoreCase) >= 0 || command.IndexOf("setinfo \"global.god\" \"1\"", StringComparison.OrdinalIgnoreCase) >= 0;
+            bool disableGod = command.IndexOf("setinfo \"global.god\" \"false\"", StringComparison.OrdinalIgnoreCase) >= 0 || command.IndexOf("setinfo \"global.god\" \"0\"", StringComparison.OrdinalIgnoreCase) >= 0;
+            PlayerInfo user = null;
 
             if (enableGod || disableGod)
             {
-                bool enabled = enableGod;
-                user.GodMode = enabled;
-                SavePlayerInfo(player, user);
+                user = LoadPlayerInfo(player);
+                if (user == null) return null;
 
-                if (enabled)
-                    EnsureDeveloperFlag(player, user);
-
-                ulong userId = player.userID;
-                if (!pendingGodModeChange.Contains(userId))
-                {
-                    pendingGodModeChange.Add(userId);
-
-                    timer.Once(0.2f, () =>
-                    {
-                        pendingGodModeChange.Remove(userId);
-
-                        if (player == null || !player.IsConnected) return;
-
-                        PlayerInfo currentUser = LoadPlayerInfo(player);
-                        if (currentUser == null) return;
-
-                        if (currentUser.GodMode != player.IsGod())
-                        {
-                            currentUser.GodMode = player.IsGod();
-                            SavePlayerInfo(player, currentUser);
-                        }
-
-                        ReleaseDeveloperFlag(player, currentUser);
-                    });
-                }
+                if (enableGod && !HasPermission(player, permGodMode) && !user.GodMode && !player.IsGod())
+                    return false;
             }
+
+            if (disabledPlayerConsoleCommands.Count > 0)
+            {
+                string playerConsoleCommand = ExtractPlayerConsoleCommandName(command);
+                if (disabledPlayerConsoleCommands.Contains(playerConsoleCommand) && !HasPermission(player, permBypassDisabledPlayerConsoleCommands))
+                    return false;
+            }
+
+            if (disabledChatCommands.Count > 0)
+            {
+                string chatCommand = ExtractChatCommandName(command);
+                if (disabledChatCommands.Contains(chatCommand) && !HasPermission(player, permBypassDisabledChatCommands))
+                    return false;
+            }
+
+            if (user == null) return null;
+
+            if (user.GodMode != enableGod)
+            {
+                user.GodMode = enableGod;
+                SavePlayerInfo(player, user);
+            }
+
+            if (enableGod)
+                EnsureDeveloperFlag(player, user);
+
+            if (!pendingGodModeChange.Contains(player.userID))
+                QueueClientGodModeSync(player);
 
             return null;
         }
@@ -554,7 +553,7 @@ namespace Oxide.Plugins
 
             string cmd = arg.cmd.FullName.ToLowerInvariant();
 
-            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
+            string[] args = GetConsoleArgs(arg);
             return TryHandleServerConsoleCommand(arg, cmd, args) ? (object)true : null;
         }
 
@@ -586,36 +585,37 @@ namespace Oxide.Plugins
             if (player == null || !player.IsConnected) return;
             if (player.IsNpc || player is NPCPlayer) return;
 
+            if (!player.IsFlying)
+            {
+                if (!playerInfoCache.TryGetValue(player.UserIDString, out var cached) || !cached.NoClip) return;
+                if (pendingNoClipToggle.Contains(player.userID)) return;
+
+                cached.NoClip = false;
+                SavePlayerInfo(player, cached);
+                ReleaseDeveloperFlag(player, cached);
+                return;
+            }
+
+            if (pendingNoClipToggle.Contains(player.userID)) return;
+
             PlayerInfo user = LoadPlayerInfo(player);
             if (user == null) return;
 
-            bool hasNoClipPermission = HasPermission(player, permNoClip);
-
-            if (!pendingNoClipToggle.Contains(player.userID) && user.NoClip != player.IsFlying)
+            if (HasCachedNoClipPermission(player))
             {
-                if (!player.IsFlying || hasNoClipPermission)
+                if (!user.NoClip)
                 {
-                    user.NoClip = player.IsFlying;
+                    user.NoClip = true;
                     SavePlayerInfo(player, user);
                     ReleaseDeveloperFlag(player, user);
                 }
+
+                return;
             }
 
-            if (!player.IsFlying || hasNoClipPermission) return;
-            if (pendingForceNoClip.Contains(player.userID) || pendingNoClipToggle.Contains(player.userID)) return;
+            if (pendingForceNoClip.Contains(player.userID)) return;
 
-            ulong userId = player.userID;
-            pendingForceNoClip.Add(userId);
-
-            timer.Once(0.05f, () =>
-            {
-                pendingForceNoClip.Remove(userId);
-
-                if (player == null || !player.IsConnected) return;
-                if (HasPermission(player, permNoClip) || !player.IsFlying) return;
-
-                SetNoClipState(player, user, false);
-            });
+            QueueForcedNoClipDisable(player);
         }
 
         private void OnServerInitialized()
@@ -649,6 +649,53 @@ namespace Oxide.Plugins
 
             CachePrefabs();
             CleanupExpiredBans();
+
+            foreach (var player in BasePlayer.activePlayerList)
+            {
+                if (player == null || !player.IsConnected || player.IsNpc || player is NPCPlayer) continue;
+
+                LoadPlayerInfo(player);
+            }
+        }
+
+        private void OnUserPermissionGranted(string id, string permName)
+        {
+            InvalidateNoClipPermission(id);
+        }
+
+        private void OnUserPermissionRevoked(string id, string permName)
+        {
+            InvalidateNoClipPermission(id);
+        }
+
+        private void OnUserGroupAdded(string id, string groupName)
+        {
+            InvalidateNoClipPermission(id);
+        }
+
+        private void OnUserGroupRemoved(string id, string groupName)
+        {
+            InvalidateNoClipPermission(id);
+        }
+
+        private void OnGroupPermissionGranted(string groupName, string permName)
+        {
+            noClipPermissionCache.Clear();
+        }
+
+        private void OnGroupPermissionRevoked(string groupName, string permName)
+        {
+            noClipPermissionCache.Clear();
+        }
+
+        private void OnGroupDeleted(string groupName)
+        {
+            noClipPermissionCache.Clear();
+        }
+
+        private void OnGroupParentSet(string groupName, string parentGroupName)
+        {
+            noClipPermissionCache.Clear();
         }
 
         private void OnUserBanned(string name, string id, string ipAddress, string reason, long expiry)
@@ -704,7 +751,7 @@ namespace Oxide.Plugins
                     changed = true;
                 }
 
-                // Optional: refresh CreatedAt when the native ban is re-applied/changed
+                // Set the creation time when the native record has none
                 if (existing.CreatedAt <= 0)
                 {
                     existing.CreatedAt = now;
@@ -772,9 +819,12 @@ namespace Oxide.Plugins
 
         private void OnPlayerDisconnected(BasePlayer player, string reason)
         {
+            if (player == null) return;
+
             pendingForceNoClip.Remove(player.userID);
             pendingNoClipToggle.Remove(player.userID);
             pendingGodModeChange.Remove(player.userID);
+            noClipPermissionCache.Remove(player.userID);
 
             var user = LoadPlayerInfo(player);
             if (user == null)
@@ -784,35 +834,23 @@ namespace Oxide.Plugins
                 return;
             }
 
-            if (user.DeveloperFlagOwned)
-            {
-                user.DeveloperFlagOwned = false;
-                SavePlayerInfo(player, user);
-            }
+            bool changed = user.DeveloperFlagOwned;
+            user.DeveloperFlagOwned = false;
 
-            if (!HasPermission(player, permNoClip) && user.NoClip)
+            if (user.NoClip && (!persistentNoClip || !HasPermission(player, permNoClip)))
             {
                 user.NoClip = false;
-                SavePlayerInfo(player, user);
+                changed = true;
             }
 
-            if (!HasPermission(player, permGodMode) && user.GodMode)
+            if (user.GodMode && (!persistentGodMode || !HasPermission(player, permGodMode)))
             {
                 user.GodMode = false;
-                SavePlayerInfo(player, user);
+                changed = true;
             }
 
-            if (!persistentNoClip && user.NoClip)
-            {
-                user.NoClip = false;
+            if (changed)
                 SavePlayerInfo(player, user);
-            }
-
-            if (!persistentGodMode && user.GodMode)
-            {
-                user.GodMode = false;
-                SavePlayerInfo(player, user);
-            }
 
             if (!player.IsDead())
             {
@@ -829,6 +867,7 @@ namespace Oxide.Plugins
 
         private void OnPlayerConnected(BasePlayer player)
         {
+            noClipPermissionCache.Remove(player.userID);
             UpdateLastKnownPlayerIdentity(player);
 
             PlayerInfo user = LoadPlayerInfo(player);
@@ -1344,19 +1383,12 @@ namespace Oxide.Plugins
 
                 if (ban.ExpiresAt <= 0)
                 {
-                    ReplyPlayerLocalized(player, "BanListEntryPermanent", index,
-                        ban.DisplayName,
-                        ban.Target,
-                        ban.Reason);
+                    ReplyPlayerLocalized(player, "BanListEntryPermanent", index, ban.DisplayName, ban.Target, ban.Reason);
                 }
                 else
                 {
                     var remaining = TimeSpan.FromSeconds(Math.Max(0, ban.ExpiresAt - UnixNow()));
-                    ReplyPlayerLocalized(player, "BanListEntryTemporary", index,
-                        ban.DisplayName,
-                        ban.Target,
-                        FormatDuration(remaining),
-                        ban.Reason);
+                    ReplyPlayerLocalized(player, "BanListEntryTemporary", index, ban.DisplayName, ban.Target, FormatDuration(remaining), ban.Reason);
                 }
             }
         }
@@ -1392,7 +1424,7 @@ namespace Oxide.Plugins
         private void cmdSpawnConsole(ConsoleSystem.Arg arg)
         {
             BasePlayer player = arg.Player();
-            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
+            string[] args = GetConsoleArgs(arg);
 
             if (player != null)
                 args = NormalizePlayerConsoleArgs(args);
@@ -1479,7 +1511,7 @@ namespace Oxide.Plugins
         private void cmdSpawnToConsole(ConsoleSystem.Arg arg)
         {
             BasePlayer player = arg.Player();
-            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
+            string[] args = GetConsoleArgs(arg);
 
             if (player != null)
                 args = NormalizePlayerConsoleArgs(args);
@@ -1582,7 +1614,7 @@ namespace Oxide.Plugins
         private void cmdSpawnAllConsole(ConsoleSystem.Arg arg)
         {
             BasePlayer player = arg.Player();
-            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
+            string[] args = GetConsoleArgs(arg);
 
             if (player != null)
                 args = NormalizePlayerConsoleArgs(args);
@@ -1865,7 +1897,7 @@ namespace Oxide.Plugins
         private void cmdGiveConsole(ConsoleSystem.Arg arg)
         {
             BasePlayer player = arg.Player();
-            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
+            string[] args = GetConsoleArgs(arg);
 
             if (player == null)
             {
@@ -2144,7 +2176,7 @@ namespace Oxide.Plugins
         private void cmdGiveToConsole(ConsoleSystem.Arg arg)
         {
             BasePlayer player = arg.Player();
-            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
+            string[] args = GetConsoleArgs(arg);
 
             if (player == null)
             {
@@ -2296,7 +2328,7 @@ namespace Oxide.Plugins
         private void cmdGiveAllConsole(ConsoleSystem.Arg arg)
         {
             BasePlayer player = arg.Player();
-            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
+            string[] args = GetConsoleArgs(arg);
 
             if (player == null)
             {
@@ -2397,7 +2429,7 @@ namespace Oxide.Plugins
                 return;
             }
 
-            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
+            string[] args = GetConsoleArgs(arg);
             if (args.Length < 1)
             {
                 ReplyPlayerConsoleLocalized(player, "UsageGiveSelf", "inventory.give");
@@ -2446,7 +2478,7 @@ namespace Oxide.Plugins
                 return;
             }
 
-            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
+            string[] args = GetConsoleArgs(arg);
             if (args.Length < 1)
             {
                 ReplyPlayerConsoleLocalized(player, "UsageGiveSelf", "inventory.giveid");
@@ -2483,7 +2515,7 @@ namespace Oxide.Plugins
         private void cmdInventoryGiveTo(ConsoleSystem.Arg arg)
         {
             BasePlayer player = arg.Player();
-            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
+            string[] args = GetConsoleArgs(arg);
 
             if (player == null)
             {
@@ -2610,7 +2642,7 @@ namespace Oxide.Plugins
         private void cmdInventoryGiveAll(ConsoleSystem.Arg arg)
         {
             BasePlayer player = arg.Player();
-            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
+            string[] args = GetConsoleArgs(arg);
 
             if (player == null)
             {
@@ -2714,7 +2746,7 @@ namespace Oxide.Plugins
             if (user == null)
                 return;
 
-            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
+            string[] args = GetConsoleArgs(arg);
             if (args.Length >= 1)
             {
                 switch (args[0].ToLower())
@@ -2852,7 +2884,7 @@ namespace Oxide.Plugins
                 return;
             }
 
-            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
+            string[] args = GetConsoleArgs(arg);
             if (args.Length < 1)
             {
                 ReplyPlayerConsoleLocalized(player, "KickUsage", "kick");
@@ -2897,7 +2929,7 @@ namespace Oxide.Plugins
                 return;
             }
 
-            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
+            string[] args = GetConsoleArgs(arg);
             if (!TryParseModerationArgs(args, out var targetInput, out var duration, out var reason))
             {
                 ReplyPlayerConsoleLocalized(player, includeIp ? "BanIpUsage" : "BanUsage", includeIp ? "banip" : "ban");
@@ -3016,7 +3048,7 @@ namespace Oxide.Plugins
                 return;
             }
 
-            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
+            string[] args = GetConsoleArgs(arg);
             if (args.Length != 1)
             {
                 ReplyPlayerConsoleLocalized(player, "UnbanUsage", "unban");
@@ -3110,7 +3142,7 @@ namespace Oxide.Plugins
             string mode = "all";
             int page = 1;
 
-            string[] args = arg.Args != null ? arg.Args.Select(x => x.ToString()).ToArray() : Array.Empty<string>();
+            string[] args = GetConsoleArgs(arg);
             if (args.Length >= 1)
                 mode = args[0].ToLower();
 
@@ -3168,6 +3200,79 @@ namespace Oxide.Plugins
             }
 
             return false;
+        }
+
+        private bool HasCachedNoClipPermission(BasePlayer player)
+        {
+            float now = Time.realtimeSinceStartup;
+            if (noClipPermissionCache.TryGetValue(player.userID, out var cached) && cached.ExpiresAt > now)
+                return cached.Allowed;
+
+            bool allowed = HasPermission(player, permNoClip);
+
+            // Wildcard permission changes do not always emit individual permission hooks
+            noClipPermissionCache[player.userID] = new NoClipPermissionState
+            {
+                Allowed = allowed,
+                ExpiresAt = now + NoClipPermissionCacheDuration
+            };
+
+            return allowed;
+        }
+
+        private void InvalidateNoClipPermission(string id)
+        {
+            if (ulong.TryParse(id, out var userId))
+                noClipPermissionCache.Remove(userId);
+        }
+
+        private void QueueForcedNoClipDisable(BasePlayer player)
+        {
+            ulong userId = player.userID;
+            Connection connection = player.net?.connection;
+            pendingForceNoClip.Add(userId);
+
+            timer.Once(0.05f, () =>
+            {
+                if (player == null || !ReferenceEquals(player.net?.connection, connection)) return;
+
+                pendingForceNoClip.Remove(userId);
+
+                if (!player.IsConnected || !player.IsFlying) return;
+                if (pendingNoClipToggle.Contains(userId) || HasPermission(player, permNoClip)) return;
+
+                PlayerInfo user = LoadPlayerInfo(player);
+                if (user == null) return;
+
+                SetNoClipState(player, user, false);
+            });
+        }
+
+        private void QueueClientGodModeSync(BasePlayer player)
+        {
+            ulong userId = player.userID;
+            Connection connection = player.net?.connection;
+            pendingGodModeChange.Add(userId);
+
+            timer.Once(0.2f, () =>
+            {
+                if (player == null || !ReferenceEquals(player.net?.connection, connection)) return;
+
+                pendingGodModeChange.Remove(userId);
+
+                if (!player.IsConnected) return;
+
+                PlayerInfo user = LoadPlayerInfo(player);
+                if (user == null) return;
+
+                if (user.GodMode != player.IsGod())
+                {
+                    user.GodMode = player.IsGod();
+                    SavePlayerInfo(player, user);
+                }
+
+                ReleaseDeveloperFlag(player, user);
+            });
         }
 
         private void ToggleNoClip(BasePlayer player, bool replyToConsole = false)
@@ -3447,12 +3552,10 @@ namespace Oxide.Plugins
             if (user == null)
                 return;
 
-            PlayerInfoItems userItems = LoadPlayerInfoItems(player);
-            if (userItems == null)
-                return;
+            if (!user.SaveInventory || !HasPermission(player, permInventory)) return;
 
-            if (!HasPermission(player, permInventory) || !user.SaveInventory || userItems.Items.Count == 0)
-                return;
+            PlayerInfoItems userItems = LoadPlayerInfoItems(player);
+            if (userItems == null || userItems.Items.Count == 0) return;
 
             List<Item> currentItems = Pool.Get<List<Item>>();
             int currentCount = player.inventory.GetAllItems(currentItems);
@@ -3508,9 +3611,7 @@ namespace Oxide.Plugins
             int count = player.inventory.GetAllItems(items);
             Pool.FreeUnmanaged(ref items);
 
-            return count == 2
-                && player.inventory.GetAmount(rockDef.itemid) == 1
-                && player.inventory.GetAmount(torchDef.itemid) == 1;
+            return count == 2 && player.inventory.GetAmount(rockDef.itemid) == 1 && player.inventory.GetAmount(torchDef.itemid) == 1;
         }
 
         private void AddItemsFromContainer(ItemContainer container, string containerName, List<AdminUtilitiesItem> items, bool snapshotOnly = false)
@@ -3658,10 +3759,7 @@ namespace Oxide.Plugins
 
         private bool IsValidStoredIp(string ip)
         {
-            return !string.IsNullOrWhiteSpace(ip)
-                && ip != "0"
-                && ip != "0.0.0.0"
-                && IsIpAddress(ip);
+            return !string.IsNullOrWhiteSpace(ip) && ip != "0" && ip != "0.0.0.0" && IsIpAddress(ip);
         }
 
         private bool TryParseDuration(string input, out TimeSpan duration)
@@ -3711,9 +3809,7 @@ namespace Oxide.Plugins
                 return BasePlayer.activePlayerList.FirstOrDefault(p => p.userID == userId);
 
             return BasePlayer.activePlayerList.FirstOrDefault(p =>
-                p.UserIDString == input ||
-                p.displayName.Equals(input, StringComparison.OrdinalIgnoreCase) ||
-                p.displayName.IndexOf(input, StringComparison.OrdinalIgnoreCase) >= 0);
+                p.UserIDString == input || p.displayName.Equals(input, StringComparison.OrdinalIgnoreCase) || p.displayName.IndexOf(input, StringComparison.OrdinalIgnoreCase) >= 0);
         }
 
         private string GetKnownDisplayName(string steamId)
@@ -3728,9 +3824,7 @@ namespace Oxide.Plugins
                 return banRecord.DisplayName;
             }
 
-            if (moderationData.LastKnownNames.TryGetValue(steamId, out var knownName) &&
-                !string.IsNullOrWhiteSpace(knownName) &&
-                !string.Equals(knownName, steamId, StringComparison.OrdinalIgnoreCase))
+            if (moderationData.LastKnownNames.TryGetValue(steamId, out var knownName) && !string.IsNullOrWhiteSpace(knownName) && !string.Equals(knownName, steamId, StringComparison.OrdinalIgnoreCase))
             {
                 return knownName;
             }
@@ -3746,9 +3840,7 @@ namespace Oxide.Plugins
             if (ulong.TryParse(steamId, out var userId))
             {
                 var nativeUser = ServerUsers.Get(userId);
-                if (nativeUser != null &&
-                    !string.IsNullOrWhiteSpace(nativeUser.username) &&
-                    !string.Equals(nativeUser.username, steamId, StringComparison.OrdinalIgnoreCase))
+                if (nativeUser != null && !string.IsNullOrWhiteSpace(nativeUser.username) && !string.Equals(nativeUser.username, steamId, StringComparison.OrdinalIgnoreCase))
                 {
                     return nativeUser.username;
                 }
@@ -3765,8 +3857,7 @@ namespace Oxide.Plugins
             if (string.Equals(displayName, steamId, StringComparison.OrdinalIgnoreCase))
                 return;
 
-            if (!moderationData.LastKnownNames.TryGetValue(steamId, out var oldName) ||
-                !string.Equals(oldName, displayName, StringComparison.Ordinal))
+            if (!moderationData.LastKnownNames.TryGetValue(steamId, out var oldName) || !string.Equals(oldName, displayName, StringComparison.Ordinal))
             {
                 moderationData.LastKnownNames[steamId] = displayName;
                 SaveModerationData();
@@ -3813,15 +3904,13 @@ namespace Oxide.Plugins
                     return true;
                 }
 
-                if (moderationData.LastKnownNames.TryGetValue(steamId, out var knownName) &&
-                    !string.IsNullOrWhiteSpace(knownName))
+                if (moderationData.LastKnownNames.TryGetValue(steamId, out var knownName) && !string.IsNullOrWhiteSpace(knownName))
                 {
                     displayName = knownName;
                     return true;
                 }
 
-                if (moderationData.PlayerBans.TryGetValue(steamId, out var existingBan) &&
-                    !string.IsNullOrWhiteSpace(existingBan.DisplayName))
+                if (moderationData.PlayerBans.TryGetValue(steamId, out var existingBan) && !string.IsNullOrWhiteSpace(existingBan.DisplayName))
                 {
                     displayName = existingBan.DisplayName;
                     return true;
@@ -3874,15 +3963,9 @@ namespace Oxide.Plugins
 
             ban = null;
 
-            if (!string.IsNullOrWhiteSpace(steamId) &&
-                moderationData.PlayerBans.TryGetValue(steamId, out ban) &&
-                !IsExpired(ban))
-                return true;
+            if (!string.IsNullOrWhiteSpace(steamId) && moderationData.PlayerBans.TryGetValue(steamId, out ban) && !IsExpired(ban)) return true;
 
-            if (!string.IsNullOrWhiteSpace(ip) &&
-                moderationData.IpBans.TryGetValue(ip, out ban) &&
-                !IsExpired(ban))
-                return true;
+            if (!string.IsNullOrWhiteSpace(ip) && moderationData.IpBans.TryGetValue(ip, out ban) && !IsExpired(ban)) return true;
 
             ban = null;
             return false;
@@ -3949,9 +4032,7 @@ namespace Oxide.Plugins
             if (mode == "ips")
                 return moderationData.IpBans.OrderBy(x => x.Value.DisplayName);
 
-            return moderationData.PlayerBans
-                .Concat(moderationData.IpBans)
-                .OrderBy(x => x.Value.DisplayName);
+            return moderationData.PlayerBans.Concat(moderationData.IpBans).OrderBy(x => x.Value.DisplayName);
         }
 
         private bool TryParseModerationArgs(string[] args, out string targetInput, out TimeSpan? duration, out string reason)
@@ -4001,11 +4082,9 @@ namespace Oxide.Plugins
                 return true;
             }
 
-            var existing = moderationData.PlayerBans
-                .FirstOrDefault(x =>
+            var existing = moderationData.PlayerBans.FirstOrDefault(x =>
                     x.Key.Equals(input, StringComparison.OrdinalIgnoreCase) ||
-                    (!string.IsNullOrWhiteSpace(x.Value.DisplayName) &&
-                     x.Value.DisplayName.Equals(input, StringComparison.OrdinalIgnoreCase)));
+                    (!string.IsNullOrWhiteSpace(x.Value.DisplayName) && x.Value.DisplayName.Equals(input, StringComparison.OrdinalIgnoreCase)));
 
             if (!string.IsNullOrWhiteSpace(existing.Key))
             {
@@ -4065,8 +4144,7 @@ namespace Oxide.Plugins
         {
             string finalDisplayName = displayName;
 
-            if (string.IsNullOrWhiteSpace(finalDisplayName) ||
-                string.Equals(finalDisplayName, steamId, StringComparison.OrdinalIgnoreCase))
+            if (string.IsNullOrWhiteSpace(finalDisplayName) || string.Equals(finalDisplayName, steamId, StringComparison.OrdinalIgnoreCase))
             {
                 finalDisplayName = GetKnownDisplayName(steamId);
             }
@@ -4106,9 +4184,7 @@ namespace Oxide.Plugins
                 if (!string.IsNullOrWhiteSpace(excludeSteamId) && steamId == excludeSteamId)
                     continue;
 
-                string knownName = moderationData.LastKnownNames.TryGetValue(steamId, out var cachedName) && !string.IsNullOrWhiteSpace(cachedName)
-                    ? cachedName
-                    : steamId;
+                string knownName = moderationData.LastKnownNames.TryGetValue(steamId, out var cachedName) && !string.IsNullOrWhiteSpace(cachedName) ? cachedName : steamId;
 
                 AddOrUpdatePlayerBan(steamId, knownName, reason, duration, source);
                 SetNativeBan(steamId, knownName, reason, duration);
@@ -4401,9 +4477,7 @@ namespace Oxide.Plugins
             if (string.IsNullOrWhiteSpace(displayName))
                 return steamId ?? string.Empty;
 
-            if (string.IsNullOrWhiteSpace(steamId) ||
-                string.Equals(displayName, steamId, StringComparison.OrdinalIgnoreCase))
-                return displayName;
+            if (string.IsNullOrWhiteSpace(steamId) || string.Equals(displayName, steamId, StringComparison.OrdinalIgnoreCase)) return displayName;
 
             return $"{displayName} ({steamId})";
         }
@@ -4609,10 +4683,7 @@ namespace Oxide.Plugins
 
         private ulong GetChatMessageIconId()
         {
-            if (TryParseSteamIconId(globalServerMessagesIconSteamIdOrGroupId, out ulong iconId))
-                return iconId;
-
-            return 0;
+            return globalServerMessageIconId;
         }
 
         private bool TryParseSteamIconId(string value, out ulong steamId)
@@ -4623,22 +4694,35 @@ namespace Oxide.Plugins
 
         private void TryApplyGlobalServerIcon(string command, object[] args)
         {
-            if (args == null)
-                return;
+            if (command != "chat.add" && command != "chat.add2") return;
+            if (globalServerMessageIconValue == null || args == null || args.Length < 2) return;
 
-            ulong iconId = GetChatMessageIconId();
-            if (iconId == 0)
-                return;
+            object sender = args[1];
+            bool isServerMessage;
 
-            if (args.Length < 2)
-                return;
+            if (sender is ulong unsignedId)
+                isServerMessage = unsignedId == 0;
+            else if (sender is long signedId)
+                isServerMessage = signedId == 0;
+            else if (sender is int integerId)
+                isServerMessage = integerId == 0;
+            else
+                isServerMessage = ulong.TryParse(sender as string ?? sender?.ToString(), out var providedId) && providedId == 0;
 
-            if (command != "chat.add" && command != "chat.add2")
-                return;
+            if (isServerMessage)
+                args[1] = globalServerMessageIconValue;
+        }
 
-            ulong providedId;
-            if (ulong.TryParse(args[1]?.ToString(), out providedId) && providedId == 0)
-                args[1] = iconId;
+        private string[] GetConsoleArgs(ConsoleSystem.Arg arg)
+        {
+            var rawArgs = arg?.Args;
+            if (rawArgs == null || rawArgs.Length == 0) return Array.Empty<string>();
+
+            string[] args = new string[rawArgs.Length];
+            for (int i = 0; i < rawArgs.Length; i++)
+                args[i] = rawArgs[i].ToString();
+
+            return args;
         }
 
         private string[] NormalizePlayerConsoleArgs(string[] args)
@@ -4684,9 +4768,7 @@ namespace Oxide.Plugins
                 allPrefabs.Add(path);
 
                 string fileName = path.Substring(path.LastIndexOf('/') + 1);
-                string withoutExt = fileName.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase)
-                    ? fileName.Substring(0, fileName.Length - 7)
-                    : fileName;
+                string withoutExt = fileName.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase) ? fileName.Substring(0, fileName.Length - 7) : fileName;
 
                 AddPrefabLookup(path, path);
                 AddPrefabLookup(fileName, path);
@@ -4839,21 +4921,14 @@ namespace Oxide.Plugins
 
             string search = nameOrId.Trim();
 
-            List<BasePlayer> players = BasePlayer.activePlayerList
-                .Concat(BasePlayer.sleepingPlayerList)
-                .Distinct()
-                .ToList();
+            List<BasePlayer> players = BasePlayer.activePlayerList.Concat(BasePlayer.sleepingPlayerList).Distinct().ToList();
 
-            BasePlayer exact = players.FirstOrDefault(p =>
-                p.UserIDString.Equals(search, StringComparison.OrdinalIgnoreCase) ||
-                p.displayName.Equals(search, StringComparison.OrdinalIgnoreCase));
+            BasePlayer exact = players.FirstOrDefault(p => p.UserIDString.Equals(search, StringComparison.OrdinalIgnoreCase) || p.displayName.Equals(search, StringComparison.OrdinalIgnoreCase));
 
             if (exact != null)
                 return exact;
 
-            List<BasePlayer> partial = players
-                .Where(p => p.displayName.IndexOf(search, StringComparison.OrdinalIgnoreCase) >= 0)
-                .ToList();
+            List<BasePlayer> partial = players.Where(p => p.displayName.IndexOf(search, StringComparison.OrdinalIgnoreCase) >= 0).ToList();
 
             return partial.Count == 1 ? partial[0] : null;
         }
@@ -4982,9 +5057,7 @@ namespace Oxide.Plugins
             if (prefabLookup.TryGetValue(value, out string prefab))
                 return prefab;
 
-            if (allowDirectPrefabPaths &&
-                value.StartsWith("assets/", StringComparison.OrdinalIgnoreCase) &&
-                value.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase))
+            if (allowDirectPrefabPaths && value.StartsWith("assets/", StringComparison.OrdinalIgnoreCase) && value.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase))
             {
                 if (IsKnownSpawnPrefab(value))
                     return value;
@@ -4995,10 +5068,7 @@ namespace Oxide.Plugins
 
             if (allowPartialPrefabSearch)
             {
-                List<string> matches = allPrefabs
-                    .Where(p => p.IndexOf(value, StringComparison.OrdinalIgnoreCase) >= 0)
-                    .Take(10)
-                    .ToList();
+                List<string> matches = allPrefabs.Where(p => p.IndexOf(value, StringComparison.OrdinalIgnoreCase) >= 0).Take(10).ToList();
 
                 if (matches.Count == 1)
                     return matches[0];
@@ -5017,9 +5087,7 @@ namespace Oxide.Plugins
         private string GetPrefabDisplayName(string prefab)
         {
             string fileName = prefab.Substring(prefab.LastIndexOf('/') + 1);
-            return fileName.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase)
-                ? fileName.Substring(0, fileName.Length - 7)
-                : fileName;
+            return fileName.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase) ? fileName.Substring(0, fileName.Length - 7) : fileName;
         }
 
         private ItemDefinition FindItemDef(string input, BasePlayer permissionPlayer)
@@ -5053,9 +5121,7 @@ namespace Oxide.Plugins
                 return def;
             }
 
-            def = ItemManager.itemList.FirstOrDefault(x =>
-                x.shortname.Equals(search, StringComparison.OrdinalIgnoreCase) ||
-                x.displayName.english.Equals(search, StringComparison.OrdinalIgnoreCase));
+            def = ItemManager.itemList.FirstOrDefault(x => x.shortname.Equals(search, StringComparison.OrdinalIgnoreCase) || x.displayName.english.Equals(search, StringComparison.OrdinalIgnoreCase));
 
             if (def != null)
             {
@@ -5066,10 +5132,7 @@ namespace Oxide.Plugins
             }
 
             List<ItemDefinition> partial = ItemManager.itemList
-                .Where(x =>
-                    x.shortname.IndexOf(search, StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    x.displayName.english.IndexOf(search, StringComparison.OrdinalIgnoreCase) >= 0)
-                .ToList();
+                .Where(x => x.shortname.IndexOf(search, StringComparison.OrdinalIgnoreCase) >= 0 || x.displayName.english.IndexOf(search, StringComparison.OrdinalIgnoreCase) >= 0).ToList();
 
             if (partial.Count == 1)
             {
@@ -5087,13 +5150,9 @@ namespace Oxide.Plugins
             if (CanBypassBlacklist(permissionPlayer))
                 return false;
 
-            if (!string.IsNullOrWhiteSpace(input) &&
-                giveItemBlacklist.Contains(input.Trim(), StringComparer.OrdinalIgnoreCase))
-                return true;
+            if (!string.IsNullOrWhiteSpace(input) && giveItemBlacklist.Contains(input.Trim(), StringComparer.OrdinalIgnoreCase)) return true;
 
-            if (def != null &&
-                giveItemBlacklist.Contains(def.shortname, StringComparer.OrdinalIgnoreCase))
-                return true;
+            if (def != null && giveItemBlacklist.Contains(def.shortname, StringComparer.OrdinalIgnoreCase)) return true;
 
             return false;
         }
@@ -5265,6 +5324,8 @@ namespace Oxide.Plugins
         private bool logKickToConsole;
         private bool logBanToConsole;
         private string globalServerMessagesIconSteamIdOrGroupId;
+        private ulong globalServerMessageIconId;
+        private object globalServerMessageIconValue;
         private HashSet<string> disabledPlayerConsoleCommands = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private HashSet<string> disabledChatCommands = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private float spawnDistance;
@@ -5389,6 +5450,205 @@ namespace Oxide.Plugins
         }
 
         protected override void LoadDefaultConfig() => PrintWarning("Generating default configuration file...");
+
+        private void InitConfig()
+        {
+            ConfigChanged = false;
+
+            PluginConfigData config = BuildConfig();
+            ApplyConfig(config);
+
+            if (ConfigChanged)
+            {
+                PrintWarning("Updated configuration file with new/changed values.");
+                Config.WriteObject(config, true);
+            }
+        }
+
+        private PluginConfigData BuildConfig()
+        {
+            PluginConfigData config = new PluginConfigData();
+
+            config.General.DefaultTeleportToPositionOnDisconnect = ReadConfigValue("(0, 0, 0)",
+                new[] { "General", "Default Teleport To Position On Disconnect" },
+                new[] { "Settings", "Default Teleport To Position On Disconnect" });
+
+            config.General.DisabledPlayerConsoleCommands = ReadConfigValue(new List<string> { },
+                new[] { "General", "Disabled Player Console Commands" }) ?? new List<string> { };
+
+            config.General.DisabledChatCommands = ReadConfigValue(new List<string> { },
+                new[] { "General", "Disabled Chat Commands" }) ?? new List<string> { };
+
+            config.General.WipeSavedInventoriesOnMapWipe = ReadConfigValue(false,
+                new[] { "General", "Wipe Saved Inventories On Map Wipe" },
+                new[] { "Settings", "Wipe Saved Inventories On Map Wipe" });
+
+            config.General.WipePlayersSettingsOnMapWipe = ReadConfigValue(false,
+                new[] { "General", "Wipe Players Settings On Map Wipe" },
+                new[] { "Settings", "Wipe Players Settings On Map Wipe" });
+
+            config.General.GlobalServerMessagesIconSteamIdOrGroupId = ReadConfigValue(string.Empty,
+                new[] { "General", "Global Server Messages Icon Steam ID Or Group ID" });
+
+            config.NoClipAndGod.EnablePersistentNoClip = ReadConfigValue(false,
+                new[] { "NoClip & God", "Enable Persistent NoClip" },
+                new[] { "Settings", "Enable Persistent NoClip" });
+
+            config.NoClipAndGod.EnablePersistentGodMode = ReadConfigValue(false,
+                new[] { "NoClip & God", "Enable Persistent GodMode" },
+                new[] { "Settings", "Enable Persistent GodMode" });
+
+            config.Moderation.DefaultKickReason = ReadConfigValue("Unknown reason.",
+                new[] { "Moderation", "Default Kick Reason" },
+                new[] { "Settings", "Default Kick Reason" });
+
+            config.Moderation.DefaultBanReason = ReadConfigValue("Unknown reason.",
+                new[] { "Moderation", "Default Ban Reason" },
+                new[] { "Settings", "Default Ban Reason" });
+
+            config.Moderation.BroadcastKickToGlobalChat = ReadConfigValue(true,
+                new[] { "Moderation", "Broadcast Kick To Global Chat" },
+                new[] { "Settings", "Broadcast Kick To Global Chat" });
+
+            config.Moderation.BroadcastBanToGlobalChat = ReadConfigValue(true,
+                new[] { "Moderation", "Broadcast Ban To Global Chat" },
+                new[] { "Settings", "Broadcast Ban To Global Chat" });
+
+            config.Moderation.LogKickEventsToConsole = ReadConfigValue(true,
+                new[] { "Moderation", "Log Kick Events To Console" },
+                new[] { "Settings", "Log Kick Events To Console" });
+
+            config.Moderation.LogBanEventsToConsole = ReadConfigValue(true,
+                new[] { "Moderation", "Log Ban Events To Console" },
+                new[] { "Settings", "Log Ban Events To Console" });
+
+            config.Moderation.BanListPageSize = ReadConfigValue(10,
+                new[] { "Moderation", "BanList Page Size" },
+                new[] { "Settings", "BanList Page Size" });
+
+            config.GiveAndSpawn.SpawnDistanceInFrontOfPlayer = ReadConfigValue(4f,
+                new[] { "Give & Spawn", "Spawn Distance In Front Of Player" });
+
+            config.GiveAndSpawn.UseCrosshairRaycastForSpawnPosition = ReadConfigValue(false,
+                new[] { "Give & Spawn", "Use Crosshair Raycast For Spawn Position" });
+
+            config.GiveAndSpawn.MaximumCrosshairSpawnDistance = ReadConfigValue(25f,
+                new[] { "Give & Spawn", "Maximum Crosshair Spawn Distance" });
+
+            config.GiveAndSpawn.RaiseSpawnPositionOnYAxis = ReadConfigValue(0.25f,
+                new[] { "Give & Spawn", "Raise Spawn Position On Y Axis" });
+
+            config.GiveAndSpawn.AllowDirectPrefabPaths = ReadConfigValue(true,
+                new[] { "Give & Spawn", "Allow Direct Prefab Paths" });
+
+            config.GiveAndSpawn.AllowPartialPrefabSearch = ReadConfigValue(true,
+                new[] { "Give & Spawn", "Allow Partial Prefab Search" });
+
+            config.GiveAndSpawn.MaximumDespawnDistance = ReadConfigValue(25f,
+                new[] { "Give & Spawn", "Maximum Despawn Distance" });
+
+            config.GiveAndSpawn.LogGiveCommandsToConsole = ReadConfigValue(true,
+                new[] { "Give & Spawn", "Log Give Commands To Console" });
+
+            config.GiveAndSpawn.LogSpawnCommandsToConsole = ReadConfigValue(true,
+                new[] { "Give & Spawn", "Log Spawn Commands To Console" });
+
+            config.GiveAndSpawn.SpawnAliasBlacklist = ReadConfigValue(new List<string>(),
+                new[] { "Give & Spawn", "Spawn Alias Blacklist" }) ?? new List<string>();
+
+            config.GiveAndSpawn.GiveItemBlacklist = ReadConfigValue(new List<string>(),
+                new[] { "Give & Spawn", "Give Item Blacklist" }) ?? new List<string>();
+
+            config.GiveAndSpawn.DefaultAliases = ReadConfigValue(GetDefaultAliases(),
+                new[] { "Give & Spawn", "Default Aliases" }) ?? GetDefaultAliases();
+
+            if (config.GiveAndSpawn.DefaultAliases.Count == 0)
+                config.GiveAndSpawn.DefaultAliases = GetDefaultAliases();
+
+            return config;
+        }
+
+        private void ApplyConfig(PluginConfigData config)
+        {
+            defaultPos = (config.General.DefaultTeleportToPositionOnDisconnect ?? "(0, 0, 0)").ToVector3();
+            wipeItems = config.General.WipeSavedInventoriesOnMapWipe;
+            wipeSettings = config.General.WipePlayersSettingsOnMapWipe;
+            globalServerMessagesIconSteamIdOrGroupId = config.General.GlobalServerMessagesIconSteamIdOrGroupId ?? string.Empty;
+            globalServerMessageIconId = TryParseSteamIconId(globalServerMessagesIconSteamIdOrGroupId, out var iconId) ? iconId : 0;
+            globalServerMessageIconValue = globalServerMessageIconId != 0 ? (object)globalServerMessageIconId : null;
+            disabledPlayerConsoleCommands = new HashSet<string>(
+                (config.General.DisabledPlayerConsoleCommands ?? new List<string>()).Select(NormalizeDisabledPlayerConsoleCommand).Where(value => !string.IsNullOrWhiteSpace(value)),
+                StringComparer.OrdinalIgnoreCase);
+            disabledChatCommands = new HashSet<string>(
+                (config.General.DisabledChatCommands ?? new List<string>()).Select(NormalizeDisabledChatCommand).Where(value => !string.IsNullOrWhiteSpace(value)),
+                StringComparer.OrdinalIgnoreCase);
+
+            persistentNoClip = config.NoClipAndGod.EnablePersistentNoClip;
+            persistentGodMode = config.NoClipAndGod.EnablePersistentGodMode;
+
+            defaultKickReason = string.IsNullOrWhiteSpace(config.Moderation.DefaultKickReason) ? "Unknown reason." : config.Moderation.DefaultKickReason;
+            defaultBanReason = string.IsNullOrWhiteSpace(config.Moderation.DefaultBanReason) ? "Unknown reason." : config.Moderation.DefaultBanReason;
+            broadcastKickToChat = config.Moderation.BroadcastKickToGlobalChat;
+            broadcastBanToChat = config.Moderation.BroadcastBanToGlobalChat;
+            logKickToConsole = config.Moderation.LogKickEventsToConsole;
+            logBanToConsole = config.Moderation.LogBanEventsToConsole;
+            banListPageSize = config.Moderation.BanListPageSize <= 0 ? 10 : config.Moderation.BanListPageSize;
+
+            spawnDistance = config.GiveAndSpawn.SpawnDistanceInFrontOfPlayer;
+            useCrosshairRaycast = config.GiveAndSpawn.UseCrosshairRaycastForSpawnPosition;
+            maxCrosshairDistance = config.GiveAndSpawn.MaximumCrosshairSpawnDistance;
+            spawnHeightOffset = config.GiveAndSpawn.RaiseSpawnPositionOnYAxis;
+            allowDirectPrefabPaths = config.GiveAndSpawn.AllowDirectPrefabPaths;
+            allowPartialPrefabSearch = config.GiveAndSpawn.AllowPartialPrefabSearch;
+            maxDespawnDistance = config.GiveAndSpawn.MaximumDespawnDistance;
+            logGiveToConsole = config.GiveAndSpawn.LogGiveCommandsToConsole;
+            logSpawnToConsole = config.GiveAndSpawn.LogSpawnCommandsToConsole;
+            spawnAliasBlacklist = new List<string>(config.GiveAndSpawn.SpawnAliasBlacklist ?? new List<string>());
+            giveItemBlacklist = new List<string>(config.GiveAndSpawn.GiveItemBlacklist ?? new List<string>());
+            giveSpawnAliases = new Dictionary<string, string>(config.GiveAndSpawn.DefaultAliases ?? GetDefaultAliases(), StringComparer.OrdinalIgnoreCase);
+        }
+
+        private T ReadConfigValue<T>(T defaultVal, string[] newPath, params string[][] legacyPaths)
+        {
+            object data = Config.Get(newPath);
+            if (data != null)
+                return ConvertConfigValue<T>(data, defaultVal);
+
+            foreach (string[] legacyPath in legacyPaths)
+            {
+                data = Config.Get(legacyPath);
+                if (data != null)
+                {
+                    ConfigChanged = true;
+                    return ConvertConfigValue<T>(data, defaultVal);
+                }
+            }
+
+            ConfigChanged = true;
+            return defaultVal;
+        }
+
+        private T ConvertConfigValue<T>(object data, T defaultVal)
+        {
+            if (data == null)
+                return defaultVal;
+
+            try
+            {
+                return Config.ConvertValue<T>(data);
+            }
+            catch
+            {
+                try
+                {
+                    return JsonConvert.DeserializeObject<T>(JsonConvert.SerializeObject(data));
+                }
+                catch
+                {
+                    return defaultVal;
+                }
+            }
+        }
 
         protected override void LoadDefaultMessages()
         {
@@ -5582,209 +5842,6 @@ namespace Oxide.Plugins
                 ["GiveAllSuccess"] = "Ai dat <color=orange>{0}</color> x<color=orange>{1}</color> la <color=orange>{2}</color> jucător(i)",
                 ["GiveAllFail"] = "Nu am putut da <color=orange>{0}</color> x<color=orange>{1}</color> niciunui jucător"
             }, this, "ro");
-        }
-
-        private void InitConfig()
-        {
-            ConfigChanged = false;
-
-            PluginConfigData config = BuildConfig();
-            ApplyConfig(config);
-
-            if (ConfigChanged)
-            {
-                PrintWarning("Updated configuration file with new/changed values.");
-                Config.WriteObject(config, true);
-            }
-        }
-
-        private PluginConfigData BuildConfig()
-        {
-            PluginConfigData config = new PluginConfigData();
-
-            config.General.DefaultTeleportToPositionOnDisconnect = ReadConfigValue("(0, 0, 0)",
-                new[] { "General", "Default Teleport To Position On Disconnect" },
-                new[] { "Settings", "Default Teleport To Position On Disconnect" });
-
-            config.General.DisabledPlayerConsoleCommands = ReadConfigValue(new List<string> { },
-                new[] { "General", "Disabled Player Console Commands" }) ?? new List<string> { };
-
-            config.General.DisabledChatCommands = ReadConfigValue(new List<string> { },
-                new[] { "General", "Disabled Chat Commands" }) ?? new List<string> { };
-
-            config.General.WipeSavedInventoriesOnMapWipe = ReadConfigValue(false,
-                new[] { "General", "Wipe Saved Inventories On Map Wipe" },
-                new[] { "Settings", "Wipe Saved Inventories On Map Wipe" });
-
-            config.General.WipePlayersSettingsOnMapWipe = ReadConfigValue(false,
-                new[] { "General", "Wipe Players Settings On Map Wipe" },
-                new[] { "Settings", "Wipe Players Settings On Map Wipe" });
-
-            config.General.GlobalServerMessagesIconSteamIdOrGroupId = ReadConfigValue(string.Empty,
-                new[] { "General", "Global Server Messages Icon Steam ID Or Group ID" });
-
-            config.NoClipAndGod.EnablePersistentNoClip = ReadConfigValue(false,
-                new[] { "NoClip & God", "Enable Persistent NoClip" },
-                new[] { "Settings", "Enable Persistent NoClip" });
-
-            config.NoClipAndGod.EnablePersistentGodMode = ReadConfigValue(false,
-                new[] { "NoClip & God", "Enable Persistent GodMode" },
-                new[] { "Settings", "Enable Persistent GodMode" });
-
-            config.Moderation.DefaultKickReason = ReadConfigValue("Unknown reason.",
-                new[] { "Moderation", "Default Kick Reason" },
-                new[] { "Settings", "Default Kick Reason" });
-
-            config.Moderation.DefaultBanReason = ReadConfigValue("Unknown reason.",
-                new[] { "Moderation", "Default Ban Reason" },
-                new[] { "Settings", "Default Ban Reason" });
-
-            config.Moderation.BroadcastKickToGlobalChat = ReadConfigValue(true,
-                new[] { "Moderation", "Broadcast Kick To Global Chat" },
-                new[] { "Settings", "Broadcast Kick To Global Chat" });
-
-            config.Moderation.BroadcastBanToGlobalChat = ReadConfigValue(true,
-                new[] { "Moderation", "Broadcast Ban To Global Chat" },
-                new[] { "Settings", "Broadcast Ban To Global Chat" });
-
-            config.Moderation.LogKickEventsToConsole = ReadConfigValue(true,
-                new[] { "Moderation", "Log Kick Events To Console" },
-                new[] { "Settings", "Log Kick Events To Console" });
-
-            config.Moderation.LogBanEventsToConsole = ReadConfigValue(true,
-                new[] { "Moderation", "Log Ban Events To Console" },
-                new[] { "Settings", "Log Ban Events To Console" });
-
-            config.Moderation.BanListPageSize = ReadConfigValue(10,
-                new[] { "Moderation", "BanList Page Size" },
-                new[] { "Settings", "BanList Page Size" });
-
-            config.GiveAndSpawn.SpawnDistanceInFrontOfPlayer = ReadConfigValue(4f,
-                new[] { "Give & Spawn", "Spawn Distance In Front Of Player" });
-
-            config.GiveAndSpawn.UseCrosshairRaycastForSpawnPosition = ReadConfigValue(false,
-                new[] { "Give & Spawn", "Use Crosshair Raycast For Spawn Position" });
-
-            config.GiveAndSpawn.MaximumCrosshairSpawnDistance = ReadConfigValue(25f,
-                new[] { "Give & Spawn", "Maximum Crosshair Spawn Distance" });
-
-            config.GiveAndSpawn.RaiseSpawnPositionOnYAxis = ReadConfigValue(0.25f,
-                new[] { "Give & Spawn", "Raise Spawn Position On Y Axis" });
-
-            config.GiveAndSpawn.AllowDirectPrefabPaths = ReadConfigValue(true,
-                new[] { "Give & Spawn", "Allow Direct Prefab Paths" });
-
-            config.GiveAndSpawn.AllowPartialPrefabSearch = ReadConfigValue(true,
-                new[] { "Give & Spawn", "Allow Partial Prefab Search" });
-
-            config.GiveAndSpawn.MaximumDespawnDistance = ReadConfigValue(25f,
-                new[] { "Give & Spawn", "Maximum Despawn Distance" });
-
-            config.GiveAndSpawn.LogGiveCommandsToConsole = ReadConfigValue(true,
-                new[] { "Give & Spawn", "Log Give Commands To Console" });
-
-            config.GiveAndSpawn.LogSpawnCommandsToConsole = ReadConfigValue(true,
-                new[] { "Give & Spawn", "Log Spawn Commands To Console" });
-
-            config.GiveAndSpawn.SpawnAliasBlacklist = ReadConfigValue(new List<string>(),
-                new[] { "Give & Spawn", "Spawn Alias Blacklist" }) ?? new List<string>();
-
-            config.GiveAndSpawn.GiveItemBlacklist = ReadConfigValue(new List<string>(),
-                new[] { "Give & Spawn", "Give Item Blacklist" }) ?? new List<string>();
-
-            config.GiveAndSpawn.DefaultAliases = ReadConfigValue(GetDefaultAliases(),
-                new[] { "Give & Spawn", "Default Aliases" }) ?? GetDefaultAliases();
-
-            if (config.GiveAndSpawn.DefaultAliases.Count == 0)
-                config.GiveAndSpawn.DefaultAliases = GetDefaultAliases();
-
-            return config;
-        }
-
-        private void ApplyConfig(PluginConfigData config)
-        {
-            defaultPos = (config.General.DefaultTeleportToPositionOnDisconnect ?? "(0, 0, 0)").ToVector3();
-            wipeItems = config.General.WipeSavedInventoriesOnMapWipe;
-            wipeSettings = config.General.WipePlayersSettingsOnMapWipe;
-            globalServerMessagesIconSteamIdOrGroupId = config.General.GlobalServerMessagesIconSteamIdOrGroupId ?? string.Empty;
-            disabledPlayerConsoleCommands = new HashSet<string>(
-                (config.General.DisabledPlayerConsoleCommands ?? new List<string>())
-                    .Select(NormalizeDisabledPlayerConsoleCommand)
-                    .Where(value => !string.IsNullOrWhiteSpace(value)),
-                StringComparer.OrdinalIgnoreCase
-            );
-            disabledChatCommands = new HashSet<string>(
-                (config.General.DisabledChatCommands ?? new List<string>())
-                    .Select(NormalizeDisabledChatCommand)
-                    .Where(value => !string.IsNullOrWhiteSpace(value)),
-                StringComparer.OrdinalIgnoreCase
-            );
-
-            persistentNoClip = config.NoClipAndGod.EnablePersistentNoClip;
-            persistentGodMode = config.NoClipAndGod.EnablePersistentGodMode;
-
-            defaultKickReason = string.IsNullOrWhiteSpace(config.Moderation.DefaultKickReason) ? "Unknown reason." : config.Moderation.DefaultKickReason;
-            defaultBanReason = string.IsNullOrWhiteSpace(config.Moderation.DefaultBanReason) ? "Unknown reason." : config.Moderation.DefaultBanReason;
-            broadcastKickToChat = config.Moderation.BroadcastKickToGlobalChat;
-            broadcastBanToChat = config.Moderation.BroadcastBanToGlobalChat;
-            logKickToConsole = config.Moderation.LogKickEventsToConsole;
-            logBanToConsole = config.Moderation.LogBanEventsToConsole;
-            banListPageSize = config.Moderation.BanListPageSize <= 0 ? 10 : config.Moderation.BanListPageSize;
-
-            spawnDistance = config.GiveAndSpawn.SpawnDistanceInFrontOfPlayer;
-            useCrosshairRaycast = config.GiveAndSpawn.UseCrosshairRaycastForSpawnPosition;
-            maxCrosshairDistance = config.GiveAndSpawn.MaximumCrosshairSpawnDistance;
-            spawnHeightOffset = config.GiveAndSpawn.RaiseSpawnPositionOnYAxis;
-            allowDirectPrefabPaths = config.GiveAndSpawn.AllowDirectPrefabPaths;
-            allowPartialPrefabSearch = config.GiveAndSpawn.AllowPartialPrefabSearch;
-            maxDespawnDistance = config.GiveAndSpawn.MaximumDespawnDistance;
-            logGiveToConsole = config.GiveAndSpawn.LogGiveCommandsToConsole;
-            logSpawnToConsole = config.GiveAndSpawn.LogSpawnCommandsToConsole;
-            spawnAliasBlacklist = new List<string>(config.GiveAndSpawn.SpawnAliasBlacklist ?? new List<string>());
-            giveItemBlacklist = new List<string>(config.GiveAndSpawn.GiveItemBlacklist ?? new List<string>());
-            giveSpawnAliases = new Dictionary<string, string>(config.GiveAndSpawn.DefaultAliases ?? GetDefaultAliases(), StringComparer.OrdinalIgnoreCase);
-        }
-
-        private T ReadConfigValue<T>(T defaultVal, string[] newPath, params string[][] legacyPaths)
-        {
-            object data = Config.Get(newPath);
-            if (data != null)
-                return ConvertConfigValue<T>(data, defaultVal);
-
-            foreach (string[] legacyPath in legacyPaths)
-            {
-                data = Config.Get(legacyPath);
-                if (data != null)
-                {
-                    ConfigChanged = true;
-                    return ConvertConfigValue<T>(data, defaultVal);
-                }
-            }
-
-            ConfigChanged = true;
-            return defaultVal;
-        }
-
-        private T ConvertConfigValue<T>(object data, T defaultVal)
-        {
-            if (data == null)
-                return defaultVal;
-
-            try
-            {
-                return Config.ConvertValue<T>(data);
-            }
-            catch
-            {
-                try
-                {
-                    return JsonConvert.DeserializeObject<T>(JsonConvert.SerializeObject(data));
-                }
-                catch
-                {
-                    return defaultVal;
-                }
-            }
         }
 
         ////////////////////////////////////////////////////////////
