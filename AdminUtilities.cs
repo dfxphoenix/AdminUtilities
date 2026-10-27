@@ -15,7 +15,7 @@ using Network;
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Utilities", "dFxPhoeniX", "2.6.8")]
+    [Info("Admin Utilities", "dFxPhoeniX", "2.6.9")]
     [Description("Toggle NoClip, teleport Under Terrain and more")]
     public class AdminUtilities : RustPlugin
     {
@@ -1151,6 +1151,13 @@ namespace Oxide.Plugins
 
             if (IsIpAddress(targetInput))
             {
+                string protectedSteamId = FindProtectedPlayerOnIp(targetInput);
+                if (protectedSteamId != null)
+                {
+                    ReplyPlayerLocalized(player, "TargetProtectedFromBanIp", GetKnownDisplayName(protectedSteamId));
+                    return;
+                }
+
                 AddIpBan(targetInput, targetInput, reason, duration, player.UserIDString);
                 KickAllPlayersByIp(targetInput);
                 NotifyBanEvent(targetInput, null, targetInput, duration, reason, false, false, 0, true);
@@ -1204,6 +1211,13 @@ namespace Oxide.Plugins
 
             if (IsIpAddress(targetInput))
             {
+                string protectedSteamId = FindProtectedPlayerOnIp(targetInput);
+                if (protectedSteamId != null)
+                {
+                    ReplyPlayerLocalized(player, "TargetProtectedFromBanIp", GetKnownDisplayName(protectedSteamId));
+                    return;
+                }
+
                 AddIpBan(targetInput, targetInput, reason, duration, player.UserIDString);
                 KickAllPlayersByIp(targetInput);
 
@@ -1227,6 +1241,13 @@ namespace Oxide.Plugins
             if (permission.UserHasPermission(steamId, permPreventBanIp))
             {
                 ReplyPlayerLocalized(player, "TargetProtectedFromBanIp", displayName ?? steamId);
+                return;
+            }
+
+            string protectedIpSteamId = FindProtectedPlayerOnIp(ip);
+            if (protectedIpSteamId != null)
+            {
+                ReplyPlayerLocalized(player, "TargetProtectedFromBanIp", GetKnownDisplayName(protectedIpSteamId));
                 return;
             }
 
@@ -2940,6 +2961,13 @@ namespace Oxide.Plugins
             {
                 if (IsIpAddress(targetInput))
                 {
+                    string protectedSteamId = FindProtectedPlayerOnIp(targetInput);
+                    if (protectedSteamId != null)
+                    {
+                        ReplyPlayerConsoleLocalized(player, "TargetProtectedFromBanIp", GetKnownDisplayName(protectedSteamId));
+                        return;
+                    }
+
                     AddIpBan(targetInput, targetInput, reason, duration, player.UserIDString);
                     KickAllPlayersByIp(targetInput);
                     int bannedAccounts = BanKnownAccountsOnIp(targetInput, duration, reason, player.UserIDString);
@@ -2962,6 +2990,13 @@ namespace Oxide.Plugins
                 if (permission.UserHasPermission(steamId, permPreventBanIp))
                 {
                     ReplyPlayerConsoleLocalized(player, "TargetProtectedFromBanIp", displayName ?? steamId);
+                    return;
+                }
+
+                string protectedIpSteamId = FindProtectedPlayerOnIp(ip);
+                if (protectedIpSteamId != null)
+                {
+                    ReplyPlayerConsoleLocalized(player, "TargetProtectedFromBanIp", GetKnownDisplayName(protectedIpSteamId));
                     return;
                 }
 
@@ -2991,6 +3026,13 @@ namespace Oxide.Plugins
 
             if (IsIpAddress(targetInput))
             {
+                string protectedSteamId = FindProtectedPlayerOnIp(targetInput);
+                if (protectedSteamId != null)
+                {
+                    ReplyPlayerConsoleLocalized(player, "TargetProtectedFromBanIp", GetKnownDisplayName(protectedSteamId));
+                    return;
+                }
+
                 AddIpBan(targetInput, targetInput, reason, duration, player.UserIDString);
                 KickAllPlayersByIp(targetInput);
                 NotifyBanEvent(targetInput, null, targetInput, duration, reason, false, true, 0, true);
@@ -3485,17 +3527,18 @@ namespace Oxide.Plugins
                 float newY = terrainHeight + 2f;
                 player.Teleport(new Vector3(player.transform.position.x, newY, player.transform.position.z));
                 player.SendNetworkUpdateImmediate();
-                player.metabolism.temperature.min = -100;
-                player.metabolism.temperature.max = 100;
-                player.metabolism.radiation_poison.max = 500;
-                player.metabolism.oxygen.min = 0;
-                player.metabolism.calories.min = 0;
-                player.metabolism.wetness.max = 1;
-                player.metabolism.isDirty = true;
-                player.metabolism.SendChanges();
-                user.UnderTerrain = false;
-                SavePlayerInfo(player, user);
             }
+
+            player.metabolism.temperature.min = -100;
+            player.metabolism.temperature.max = 100;
+            player.metabolism.radiation_poison.max = 500;
+            player.metabolism.oxygen.min = 0;
+            player.metabolism.calories.min = 0;
+            player.metabolism.wetness.max = 1;
+            player.metabolism.isDirty = true;
+            player.metabolism.SendChanges();
+            user.UnderTerrain = false;
+            SavePlayerInfo(player, user);
         }
 
         private string FormatPosition(Vector3 position)
@@ -3769,23 +3812,29 @@ namespace Oxide.Plugins
             if (string.IsNullOrWhiteSpace(input))
                 return false;
 
-            var match = Regex.Match(input.Trim().ToLower(), @"^(?<value>\d+)(?<unit>[smhdw])$");
+            var match = Regex.Match(input.Trim().ToLowerInvariant(), @"^(?<value>[0-9]+)(?<unit>[smhdw])$");
             if (!match.Success)
                 return false;
 
-            if (!int.TryParse(match.Groups["value"].Value, out int value) || value <= 0)
+            if (!long.TryParse(match.Groups["value"].Value, out long value) || value <= 0)
                 return false;
 
+            long secondsPerUnit;
             switch (match.Groups["unit"].Value)
             {
-                case "s": duration = TimeSpan.FromSeconds(value); return true;
-                case "m": duration = TimeSpan.FromMinutes(value); return true;
-                case "h": duration = TimeSpan.FromHours(value); return true;
-                case "d": duration = TimeSpan.FromDays(value); return true;
-                case "w": duration = TimeSpan.FromDays(value * 7); return true;
+                case "s": secondsPerUnit = 1; break;
+                case "m": secondsPerUnit = 60; break;
+                case "h": secondsPerUnit = 3600; break;
+                case "d": secondsPerUnit = 86400; break;
+                case "w": secondsPerUnit = 604800; break;
+                default: return false;
             }
 
-            return false;
+            if (value > TimeSpan.MaxValue.Ticks / TimeSpan.TicksPerSecond / secondsPerUnit)
+                return false;
+
+            duration = TimeSpan.FromTicks(value * secondsPerUnit * TimeSpan.TicksPerSecond);
+            return true;
         }
 
         private string FormatDuration(TimeSpan duration)
@@ -3805,11 +3854,17 @@ namespace Oxide.Plugins
             if (string.IsNullOrWhiteSpace(input))
                 return null;
 
-            if (ulong.TryParse(input, out ulong userId))
-                return BasePlayer.activePlayerList.FirstOrDefault(p => p.userID == userId);
+            string search = input.Trim();
 
-            return BasePlayer.activePlayerList.FirstOrDefault(p =>
-                p.UserIDString == input || p.displayName.Equals(input, StringComparison.OrdinalIgnoreCase) || p.displayName.IndexOf(input, StringComparison.OrdinalIgnoreCase) >= 0);
+            if (ulong.TryParse(search, out ulong userId))
+                return BasePlayer.activePlayerList.FirstOrDefault(p => p != null && p.userID == userId);
+
+            List<BasePlayer> exact = BasePlayer.activePlayerList.Where(p => p != null && string.Equals(p.displayName, search, StringComparison.OrdinalIgnoreCase)).Take(2).ToList();
+            if (exact.Count > 0)
+                return exact.Count == 1 ? exact[0] : null;
+
+            List<BasePlayer> partial = BasePlayer.activePlayerList.Where(p => p != null && !string.IsNullOrEmpty(p.displayName) && p.displayName.IndexOf(search, StringComparison.OrdinalIgnoreCase) >= 0).Take(2).ToList();
+            return partial.Count == 1 ? partial[0] : null;
         }
 
         private string GetKnownDisplayName(string steamId)
@@ -3866,7 +3921,7 @@ namespace Oxide.Plugins
 
         private bool IsIpAddress(string input)
         {
-            return !string.IsNullOrWhiteSpace(input) && Regex.IsMatch(input, @"^\d{1,3}(\.\d{1,3}){3}$");
+            return !string.IsNullOrWhiteSpace(input) && Regex.IsMatch(input, @"^[0-9]{1,3}(\.[0-9]{1,3}){3}$") && IPAddress.TryParse(input, out var address) && address.ToString() == input;
         }
 
         private bool TryResolveSteamId(string input, out string steamId, out string displayName, out string ip, out BasePlayer onlinePlayer)
@@ -4053,6 +4108,9 @@ namespace Oxide.Plugins
             }
             else
             {
+                if (args.Length >= 2 && !string.IsNullOrWhiteSpace(args[1]) && Regex.IsMatch(args[1].Trim(), @"^[+-]?(?:[0-9]+(?:[.,][0-9]+)?[a-zA-Z])+$"))
+                    return false;
+
                 reason = string.Join(" ", args.Skip(1));
             }
 
@@ -4166,9 +4224,29 @@ namespace Oxide.Plugins
             SaveModerationData();
         }
 
-        private int BanKnownAccountsOnIp(string ip, TimeSpan? duration, string reason, string source, string excludeSteamId = null)
+        private string FindProtectedPlayerOnIp(string ip)
         {
-            if (string.IsNullOrWhiteSpace(ip))
+            if (!IsValidStoredIp(ip))
+                return null;
+
+            foreach (var player in BasePlayer.activePlayerList)
+            {
+                if (player?.IPlayer != null && player.IPlayer.Address == ip && permission.UserHasPermission(player.UserIDString, permPreventBanIp))
+                    return player.UserIDString;
+            }
+
+            foreach (var entry in moderationData.LastKnownIps)
+            {
+                if (entry.Value == ip && permission.UserHasPermission(entry.Key, permPreventBanIp))
+                    return entry.Key;
+            }
+
+            return null;
+        }
+
+        private int BanKnownAccountsOnIp(string ip, TimeSpan? duration, string reason, string source, string excludeSteamId = null, bool respectProtection = true)
+        {
+            if (!IsValidStoredIp(ip))
                 return 0;
 
             int count = 0;
@@ -4182,6 +4260,9 @@ namespace Oxide.Plugins
                     continue;
 
                 if (!string.IsNullOrWhiteSpace(excludeSteamId) && steamId == excludeSteamId)
+                    continue;
+
+                if (respectProtection && permission.UserHasPermission(steamId, permPreventBanIp))
                     continue;
 
                 string knownName = moderationData.LastKnownNames.TryGetValue(steamId, out var cachedName) && !string.IsNullOrWhiteSpace(cachedName) ? cachedName : steamId;
@@ -4274,7 +4355,7 @@ namespace Oxide.Plugins
                 {
                     AddIpBan(targetInput, targetInput, reason, duration, "Console");
                     KickAllPlayersByIp(targetInput);
-                    int bannedAccounts = BanKnownAccountsOnIp(targetInput, duration, reason, "Console");
+                    int bannedAccounts = BanKnownAccountsOnIp(targetInput, duration, reason, "Console", respectProtection: false);
 
                     NotifyBanEvent(targetInput, null, targetInput, duration, reason, true, true, bannedAccounts, false);
                     if (duration.HasValue)
@@ -4293,7 +4374,7 @@ namespace Oxide.Plugins
                 AddOrUpdatePlayerBan(steamId, displayName, reason, duration, "Console");
                 SetNativeBan(steamId, displayName ?? steamId, reason, duration);
 
-                if (!string.IsNullOrWhiteSpace(ip))
+                if (IsValidStoredIp(ip))
                 {
                     AddIpBan(ip, displayName ?? ip, reason, duration, "Console");
                     KickAllPlayersByIp(ip);
@@ -5042,6 +5123,21 @@ namespace Oxide.Plugins
                 return null;
             }
 
+            if (value.StartsWith("assets/", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!allowDirectPrefabPaths)
+                {
+                    reply("EntityNotFound", new object[] { value });
+                    return null;
+                }
+
+                if (IsKnownSpawnPrefab(value))
+                    return value;
+
+                reply("EntityPrefabInvalid", new object[] { value });
+                return null;
+            }
+
             if (TryResolveAliasEntity(value, out string resolvedAliasEntity, out string invalidPrefabPath))
                 return resolvedAliasEntity;
 
@@ -5056,15 +5152,6 @@ namespace Oxide.Plugins
 
             if (prefabLookup.TryGetValue(value, out string prefab))
                 return prefab;
-
-            if (allowDirectPrefabPaths && value.StartsWith("assets/", StringComparison.OrdinalIgnoreCase) && value.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase))
-            {
-                if (IsKnownSpawnPrefab(value))
-                    return value;
-
-                reply("EntityPrefabInvalid", new object[] { value });
-                return null;
-            }
 
             if (allowPartialPrefabSearch)
             {
@@ -5695,16 +5782,16 @@ namespace Oxide.Plugins
                 ["LoginBanAccountOnly"] = "Your account is banned from this server.",
                 ["LoginBanIpOnly"] = "The IP address used by this connection is banned from this server.",
                 ["LoginBanAccountAndIp"] = "Both your account and the IP address used by this connection are banned from this server.",
-                ["GlobalKickAnnouncement"] = "<color=orange>{0}</color> a primit kick de pe server. Motiv: <color=orange>{1}</color>",
-                ["GlobalBanAnnouncement"] = "<color=orange>{0}</color> a primit ban permanent pe server. Motiv: <color=orange>{1}</color>",
-                ["GlobalTempBanAnnouncement"] = "<color=orange>{0}</color> a primit ban pentru <color=orange>{1}</color>. Motiv: <color=orange>{2}</color>",
-                ["GlobalIpOnlyBanAnnouncement"] = "IP-ul <color=orange>{0}</color> a fost banat permanent pe server. Motiv: <color=orange>{1}</color>",
-                ["GlobalTempIpOnlyBanAnnouncement"] = "IP-ul <color=orange>{0}</color> a fost banat pentru <color=orange>{1}</color>. Motiv: <color=orange>{2}</color>",
-                ["GlobalBanIpAnnouncement"] = "<color=orange>{0}</color> și IP-ul său <color=orange>{1}</color> au fost banate permanent. Motiv: <color=orange>{2}</color>",
-                ["GlobalTempBanIpAnnouncement"] = "<color=orange>{0}</color> și IP-ul său <color=orange>{1}</color> au fost banate pentru <color=orange>{2}</color>. Motiv: <color=orange>{3}</color>",
-                ["GlobalUnbanAnnouncement"] = "<color=orange>{0}</color> a primit unban pe server.",
-                ["GlobalUnbanIpAnnouncement"] = "IP-ul <color=orange>{0}</color> a primit unban pe server.",
-                ["GlobalUnbanPlayerAndIpAnnouncement"] = "<color=orange>{0}</color> și IP-ul său <color=orange>{1}</color> au primit unban pe server.",
+                ["GlobalKickAnnouncement"] = "<color=orange>{0}</color> was kicked from the server. Reason: <color=orange>{1}</color>",
+                ["GlobalBanAnnouncement"] = "<color=orange>{0}</color> was permanently banned from the server. Reason: <color=orange>{1}</color>",
+                ["GlobalTempBanAnnouncement"] = "<color=orange>{0}</color> was banned for <color=orange>{1}</color>. Reason: <color=orange>{2}</color>",
+                ["GlobalIpOnlyBanAnnouncement"] = "IP address <color=orange>{0}</color> was permanently banned from the server. Reason: <color=orange>{1}</color>",
+                ["GlobalTempIpOnlyBanAnnouncement"] = "IP address <color=orange>{0}</color> was banned for <color=orange>{1}</color>. Reason: <color=orange>{2}</color>",
+                ["GlobalBanIpAnnouncement"] = "<color=orange>{0}</color> and their IP address <color=orange>{1}</color> were permanently banned. Reason: <color=orange>{2}</color>",
+                ["GlobalTempBanIpAnnouncement"] = "<color=orange>{0}</color> and their IP address <color=orange>{1}</color> were banned for <color=orange>{2}</color>. Reason: <color=orange>{3}</color>",
+                ["GlobalUnbanAnnouncement"] = "<color=orange>{0}</color> was unbanned from the server.",
+                ["GlobalUnbanIpAnnouncement"] = "IP address <color=orange>{0}</color> was unbanned from the server.",
+                ["GlobalUnbanPlayerAndIpAnnouncement"] = "<color=orange>{0}</color> and their IP address <color=orange>{1}</color> were unbanned from the server.",
                 ["BanListUsage"] = "Usage: {0} [all/players/ips] [page]",
                 ["BanListEmpty"] = "There are no banned entries to display.",
                 ["BanListHeader"] = "Ban list (<color=orange>{0}</color>) - page <color=orange>{1}</color>/<color=orange>{2}</color>:",
@@ -6018,6 +6105,13 @@ namespace Oxide.Plugins
 
             if (IsIpAddress(targetInput))
             {
+                string protectedSteamId = FindProtectedPlayerOnIp(targetInput);
+                if (protectedSteamId != null)
+                {
+                    ReplyPlayerLocalized(actor, "TargetProtectedFromBanIp", GetKnownDisplayName(protectedSteamId));
+                    return false;
+                }
+
                 AddIpBan(targetInput, targetInput, reason, duration, source);
                 KickAllPlayersByIp(targetInput);
                 NotifyBanEvent(targetInput, null, targetInput, duration, reason, false, true, 0, true);
@@ -6171,6 +6265,13 @@ namespace Oxide.Plugins
 
             if (IsIpAddress(targetInput))
             {
+                string protectedSteamId = FindProtectedPlayerOnIp(targetInput);
+                if (protectedSteamId != null)
+                {
+                    ReplyPlayerLocalized(actor, "TargetProtectedFromBanIp", GetKnownDisplayName(protectedSteamId));
+                    return false;
+                }
+
                 AddIpBan(targetInput, targetInput, reason, duration, source);
                 KickAllPlayersByIp(targetInput);
 
@@ -6197,6 +6298,13 @@ namespace Oxide.Plugins
             if (permission.UserHasPermission(steamId, permPreventBanIp))
             {
                 ReplyPlayerLocalized(actor, "TargetProtectedFromBanIp", displayName ?? steamId);
+                return false;
+            }
+
+            string protectedIpSteamId = FindProtectedPlayerOnIp(ip);
+            if (protectedIpSteamId != null)
+            {
+                ReplyPlayerLocalized(actor, "TargetProtectedFromBanIp", GetKnownDisplayName(protectedIpSteamId));
                 return false;
             }
 
